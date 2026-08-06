@@ -51,6 +51,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             claude_bin: String::new(),
+            // anchors!!!
             anchors: vec!["05:30".into(), "10:30".into(), "15:30".into()],
             weekdays: vec!["Mon".into(), "Tue".into(), "Wed".into(), "Thu".into(), "Fri".into()],
             model: "haiku".into(),
