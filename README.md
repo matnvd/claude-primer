@@ -165,11 +165,20 @@ Register `claude-primer` as Claude Code's status line for an always-visible read
 
 ## Configuration
 
-`~/.config/claude-primer/config.toml`
+The config lives **outside the repo**, in a hidden directory in your home folder, so it won't appear in your editor's file tree:
+
+```
+~/.config/claude-primer/config.toml
+```
+
+```sh
+code $(claude-primer config-path)     # open it
+claude-primer status                  # also prints the path at the top
+```
 
 ```toml
 claude_bin    = "/Users/you/.local/bin/claude"   # resolved at install
-anchors       = ["05:30", "10:30", "15:30"]
+anchors       = ["05:30", "10:30", "15:30"]      # the base set
 weekdays      = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 model         = "haiku"
 timezone      = "EDT"                            # fixed UTC-4, no automatic DST
@@ -178,7 +187,78 @@ on_missed     = "skip"                           # "skip" | "shift"
 grace_minutes = 20
 ```
 
-After editing, re-run `claude-primer install` to regenerate the launchd units.
+After editing, **re-run `claude-primer install`** to regenerate the launchd units — anchor times are baked into the plist as `StartCalendarInterval` entries. `simulate` and `status` reflect an edit immediately, but the live schedule won't until you reinstall.
+
+Check a new anchor set before committing to it. This costs nothing:
+
+```sh
+claude-primer simulate --workday 09:00-17:00 --anchors 06:00,11:00,16:00
+```
+
+It will warn if an anchor lands inside a still-open window, which spends quota and opens nothing.
+
+### Setting times per day
+
+Every day of the week can have its own schedule — different times, and a different *number* of primes. There is nothing weekend-specific about it.
+
+Two ways to write times, and they work together:
+
+| | What it does |
+|---|---|
+| `anchors` + `weekdays` | **Shorthand** — "these times, on these days." So you don't repeat the same three times five times over. |
+| `[schedules]` | **Per-day** — names one day and gives it its own times. Overrides the shorthand for that day. |
+
+**Same times every workday** (the default). Shorthand only:
+
+```toml
+anchors  = ["05:30", "10:30", "15:30"]
+weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+```
+
+**Workdays plus different weekend times.** Shorthand for Mon–Fri, overrides for the rest:
+
+```toml
+anchors  = ["05:30", "10:30", "15:30"]
+weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+
+[schedules]
+Sat = ["09:00", "14:00"]
+Sun = ["11:00"]
+```
+
+**Every day different.** Skip the shorthand entirely — leave `anchors` and `weekdays` empty:
+
+```toml
+anchors  = []
+weekdays = []
+
+[schedules]
+Mon = ["05:30", "10:30", "15:30"]
+Tue = ["06:00", "11:00", "16:00"]
+Wed = ["05:30", "10:30", "15:30"]
+Thu = ["07:00", "12:00"]
+Fri = ["05:30", "10:30"]
+Sat = ["09:00", "14:00"]
+Sun = ["11:00"]
+```
+
+`status` renders whichever you use as a full week:
+
+```
+  schedule (EDT declared → system-local UTC-3)
+    Mon  05:30 → 06:30   10:30 → 11:30   15:30 → 16:30   (per-day override)
+    Thu  07:00 → 08:00   12:00 → 13:00                   (per-day override)
+    Sun  11:00 → 12:00                                   (per-day override)
+```
+
+Notes:
+
+- A day in `[schedules]` is active **whether or not** it appears in `weekdays`.
+- An empty list (`Wed = []`) switches that day off.
+- A day in neither is off. By default that's Saturday and Sunday, and a run then exits with `skipped: not a scheduled weekday`, spending nothing.
+- Omitting `[schedules]` entirely keeps the original behaviour, so existing configs are unaffected.
+
+One consequence worth knowing: `pmset` allows only **one** repeating wake event, and it goes to the earliest anchor of the `anchors`/`weekdays` shorthand. Anchors from `[schedules]` are covered by rolling one-time wake events instead, re-armed daily by the root daemon. Without that daemon, those primes only fire when the Mac is already awake.
 
 ### Timezone
 
@@ -199,14 +279,22 @@ claude -p "ok" --model haiku --system-prompt "Reply with exactly: OK" --tools ""
   --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 ```
 
-These aren't cosmetic. Measured on a real run:
+### What "cost" means here
 
-| | cost | input tokens |
+On a Pro or Max subscription **a prime does not cost you money.** The `total_cost_usd` that Claude Code reports — and that `claude-primer` logs — is what the request *would* cost at standard API rates. It's a usage meter, not a bill.
+
+What a prime actually spends is **quota**: your 5-hour session allowance and your weekly caps. Dollars only enter the picture if you have separately enabled extra usage / usage credits *and* have gone past your included limits, at which point Claude continues at consumption-based pricing instead of blocking.
+
+So read the dollar figures below as a proxy for size. **The input-token column is the one that matters**, because tokens are what your weekly cap is denominated in.
+
+### Measured
+
+| | reported cost | input tokens |
 |---|---|---|
 | `--system-prompt` + `--model haiku` only | $0.022613 | 11,139 |
 | full flag set above | **$0.000675** | **240** |
 
-**33× cheaper, 46× fewer tokens** — and it's the token count that matters against your weekly cap.
+**46× fewer tokens against your cap.**
 
 Two findings drove that gap:
 
@@ -217,7 +305,7 @@ The rest: `--system-prompt` replaces the default system prompt (measured: the pr
 
 `--bare` would be the obvious choice here and is deliberately **not** used: bare mode never reads OAuth credentials or `CLAUDE_CODE_OAUTH_TOKEN`, so it would bill the API instead of touching your subscription window — the opposite of the goal.
 
-At 3 primes a day, 5 days a week, the scheduling overhead is roughly **3,600 input tokens and $0.01 per week**.
+At 3 primes a day, 5 days a week, the scheduling overhead is roughly **3,600 input tokens per week** against your caps — and no money on a subscription.
 
 ---
 

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone, Weekday};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Anchors are declared in fixed EDT (UTC-4) with no automatic DST adjustment.
@@ -19,8 +20,14 @@ pub struct Config {
     /// which does not include ~/.local/bin — resolving this at install time is what
     /// keeps the scheduled job from silently doing nothing.
     pub claude_bin: String,
+    /// The base anchor set, used on every day listed in `weekdays`.
     pub anchors: Vec<String>,
     pub weekdays: Vec<String>,
+    /// Per-day overrides, e.g. `[schedules] Sat = ["09:00", "14:00"]`. A day listed
+    /// here uses its own anchors and runs whether or not it appears in `weekdays`,
+    /// so a weekend schedule needs only this table. An empty list disables a day.
+    #[serde(default)]
+    pub schedules: BTreeMap<String, Vec<String>>,
     pub model: String,
     pub timezone: String,
     pub notify_on: NotifyOn,
@@ -54,6 +61,8 @@ impl Default for Config {
             // anchors!!!
             anchors: vec!["05:30".into(), "10:30".into(), "15:30".into()],
             weekdays: vec!["Mon".into(), "Tue".into(), "Wed".into(), "Thu".into(), "Fri".into()],
+            // No weekend entries by default; add e.g. Sat = ["09:00", "14:00"] to opt in.
+            schedules: BTreeMap::new(),
             model: "haiku".into(),
             timezone: "EDT".into(),
             notify_on: NotifyOn::Failure,
@@ -75,6 +84,9 @@ impl Config {
         toml::from_str(&raw).with_context(|| format!("could not parse {}", p.display()))
     }
 
+    /// Serializing the struct discards every comment in the file, so this is only
+    /// used to create a config that does not exist yet. Never call it to "update" a
+    /// config the user has edited — see `write_default_if_absent`.
     pub fn save(&self) -> Result<()> {
         let p = Self::path()?;
         std::fs::create_dir_all(p.parent().unwrap())?;
@@ -82,6 +94,19 @@ impl Config {
         Ok(())
     }
 
+    /// Write a commented starter config, but only when none exists. Returns whether
+    /// a file was created, so `install` can leave a hand-edited config untouched.
+    pub fn write_default_if_absent(claude_bin: &str) -> Result<bool> {
+        let p = Self::path()?;
+        if p.exists() {
+            return Ok(false);
+        }
+        std::fs::create_dir_all(p.parent().unwrap())?;
+        std::fs::write(&p, default_config_toml(claude_bin))?;
+        Ok(true)
+    }
+
+    /// The base anchor set. Prefer `anchors_for` — this ignores per-day overrides.
     pub fn anchors(&self) -> Result<Vec<Anchor>> {
         self.anchors.iter().map(|s| Anchor::parse(s)).collect()
     }
@@ -90,11 +115,116 @@ impl Config {
         self.weekdays.iter().map(|d| parse_weekday(d)).collect()
     }
 
-    /// Whether the given EDT-local date is a scheduled day. The weekday is taken in
-    /// EDT because that is the zone the anchors are declared in.
-    pub fn runs_on(&self, date_edt: NaiveDate) -> Result<bool> {
-        Ok(self.weekday_set()?.contains(&date_edt.weekday()))
+    /// The anchors that apply on a given EDT-local date, sorted.
+    ///
+    /// A `[schedules]` entry for that weekday wins outright, and makes the day active
+    /// even when it is absent from `weekdays` — which is how a weekend gets its own
+    /// times. Otherwise the base `anchors` apply if the day is in `weekdays`. Neither
+    /// case matching means the day is off.
+    ///
+    /// The weekday is taken in EDT because that is the zone anchors are declared in.
+    pub fn anchors_for(&self, date_edt: NaiveDate) -> Result<Vec<Anchor>> {
+        let want = date_edt.weekday();
+        for (day, times) in &self.schedules {
+            if parse_weekday(day)? == want {
+                let mut a: Vec<Anchor> = times.iter().map(|s| Anchor::parse(s)).collect::<Result<_>>()?;
+                a.sort();
+                return Ok(a);
+            }
+        }
+        if self.weekday_set()?.contains(&want) {
+            let mut a = self.anchors()?;
+            a.sort();
+            return Ok(a);
+        }
+        Ok(Vec::new())
     }
+
+    /// Whether anything is scheduled on this date.
+    pub fn runs_on(&self, date_edt: NaiveDate) -> Result<bool> {
+        Ok(!self.anchors_for(date_edt)?.is_empty())
+    }
+
+    /// Every weekday that has at least one anchor, with the anchors that apply.
+    pub fn active_days(&self) -> Result<Vec<(Weekday, Vec<Anchor>)>> {
+        const ALL: [Weekday; 7] = [
+            Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu,
+            Weekday::Fri, Weekday::Sat, Weekday::Sun,
+        ];
+        let today = today_edt();
+        let mut out = Vec::new();
+        for w in ALL {
+            let probe = nearest_date_with_weekday(today, w);
+            let anchors = self.anchors_for(probe)?;
+            if !anchors.is_empty() {
+                out.push((w, anchors));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The next date on or after `from` that falls on `want`.
+pub fn nearest_date_with_weekday(from: NaiveDate, want: Weekday) -> NaiveDate {
+    let mut d = from;
+    for _ in 0..7 {
+        if d.weekday() == want {
+            return d;
+        }
+        d = d.succ_opt().unwrap_or(d);
+    }
+    from
+}
+
+/// A commented starter config. Comments survive because nothing rewrites the file
+/// once it exists — `install` reads it and leaves it alone.
+pub fn default_config_toml(claude_bin: &str) -> String {
+    format!(
+        r##"# claude-primer configuration
+# Comments use '#'. This file is never rewritten once it exists, so anything you
+# add here is safe. Re-run `claude-primer install` after editing: anchor times are
+# baked into the launchd job, so edits do not take effect until you reinstall.
+
+# Absolute path — launchd gives jobs a minimal PATH that excludes ~/.local/bin.
+claude_bin = "{claude_bin}"
+
+# Times to send a priming prompt, declared in EDT (fixed UTC-4, no DST shifting).
+# `status` shows each one converted to your Mac's clock.
+anchors  = ["05:30", "10:30", "15:30"]
+
+# Days the `anchors` above apply to. Days listed in neither this nor [schedules]
+# are off, and a run on one exits without spending anything.
+weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+
+# haiku is the cheapest and stays off the Sonnet-specific weekly cap.
+model = "haiku"
+
+timezone = "EDT"
+
+# When to post a macOS notification: "failure" | "never" | "always".
+# On "failure", silence means everything worked.
+notify_on = "failure"
+
+# What to do when an anchor passed while the Mac was off and launchd catches up late:
+#   "skip"  - do nothing (default). Firing late would open a misaligned window and
+#             shift every later boundary, which is worse than missing one.
+#   "shift" - prime anyway and accept the shifted window.
+on_missed = "skip"
+
+# How late an anchor may fire and still count as on time.
+grace_minutes = 20
+
+# Per-day schedules. A day here uses its own times and is active whether or not it
+# appears in `weekdays`. An empty list turns a day off. Uncomment to use:
+#
+# [schedules]
+# Sat = ["09:00", "14:00"]
+# Sun = ["11:00"]
+#
+# For a fully per-day setup, set anchors = [] and weekdays = [] above and list all
+# seven days here. [schedules] must stay at the end of the file.
+"##
+    )
 }
 
 /// A wall-clock time of day, declared in EDT.
@@ -229,6 +359,111 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
         let dt = Anchor::parse("05:30").unwrap().local_on(date).unwrap();
         assert_eq!(dt.naive_utc().format("%H:%M").to_string(), "09:30");
+    }
+
+    fn on(cfg: &Config, weekday: Weekday) -> Vec<String> {
+        let d = nearest_date_with_weekday(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(), weekday);
+        cfg.anchors_for(d).unwrap().iter().map(|a| a.label()).collect()
+    }
+
+    #[test]
+    fn the_generated_config_is_commented_and_parses() {
+        let src = default_config_toml("/Users/x/.local/bin/claude");
+        assert!(src.contains('#'), "starter config should explain itself");
+        let c: Config = toml::from_str(&src).expect("generated config must parse");
+        assert_eq!(c.claude_bin, "/Users/x/.local/bin/claude");
+        assert_eq!(c.anchors, vec!["05:30", "10:30", "15:30"]);
+        // [schedules] is shown commented out, so it must parse as absent.
+        assert!(c.schedules.is_empty());
+    }
+
+    #[test]
+    fn comments_survive_a_parse_but_not_a_serialize() {
+        // Documents exactly why install must not rewrite an existing config:
+        // round-tripping through the struct silently discards every comment.
+        let src = default_config_toml("/bin/claude");
+        let round_tripped = toml::to_string_pretty(&toml::from_str::<Config>(&src).unwrap()).unwrap();
+        assert!(!round_tripped.contains('#'), "serializing drops comments — hence write_default_if_absent");
+    }
+
+    #[test]
+    fn weekends_are_off_by_default() {
+        let c = Config::default();
+        assert!(on(&c, Weekday::Sat).is_empty());
+        assert!(on(&c, Weekday::Sun).is_empty());
+        assert_eq!(on(&c, Weekday::Mon), vec!["05:30", "10:30", "15:30"]);
+    }
+
+    #[test]
+    fn a_per_day_schedule_overrides_the_base_anchors() {
+        let mut c = Config::default();
+        c.schedules.insert("Sat".into(), vec!["09:00".into(), "14:00".into()]);
+        assert_eq!(on(&c, Weekday::Sat), vec!["09:00", "14:00"]);
+        // Weekdays keep the base set.
+        assert_eq!(on(&c, Weekday::Mon), vec!["05:30", "10:30", "15:30"]);
+    }
+
+    #[test]
+    fn a_per_day_schedule_activates_a_day_absent_from_weekdays() {
+        // Saturday is not in `weekdays`, but a [schedules] entry is enough on its own.
+        let mut c = Config::default();
+        c.schedules.insert("Sun".into(), vec!["10:00".into()]);
+        let d = nearest_date_with_weekday(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(), Weekday::Sun);
+        assert!(c.runs_on(d).unwrap());
+    }
+
+    #[test]
+    fn an_empty_per_day_list_disables_that_day() {
+        let mut c = Config::default();
+        c.schedules.insert("Wed".into(), vec![]);
+        let d = nearest_date_with_weekday(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(), Weekday::Wed);
+        assert!(!c.runs_on(d).unwrap());
+        assert!(on(&c, Weekday::Wed).is_empty());
+    }
+
+    #[test]
+    fn per_day_anchors_are_sorted() {
+        let mut c = Config::default();
+        c.schedules.insert("Sat".into(), vec!["14:00".into(), "09:00".into()]);
+        assert_eq!(on(&c, Weekday::Sat), vec!["09:00", "14:00"]);
+    }
+
+    #[test]
+    fn active_days_lists_weekdays_and_overrides_together() {
+        let mut c = Config::default();
+        c.schedules.insert("Sat".into(), vec!["09:00".into()]);
+        let days: Vec<Weekday> = c.active_days().unwrap().into_iter().map(|(w, _)| w).collect();
+        assert_eq!(days, vec![
+            Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri, Weekday::Sat
+        ]);
+    }
+
+    #[test]
+    fn schedules_round_trip_through_toml() {
+        let mut c = Config::default();
+        c.claude_bin = "/bin/claude".into();
+        c.schedules.insert("Sat".into(), vec!["09:00".into(), "14:00".into()]);
+        let s = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.schedules.get("Sat").unwrap(), &vec!["09:00", "14:00"]);
+    }
+
+    #[test]
+    fn a_config_without_schedules_still_parses() {
+        // Backward compatibility: `schedules` is #[serde(default)].
+        let toml_src = r#"
+claude_bin = "/bin/claude"
+anchors = ["05:30"]
+weekdays = ["Mon"]
+model = "haiku"
+timezone = "EDT"
+notify_on = "failure"
+on_missed = "skip"
+grace_minutes = 20
+"#;
+        let c: Config = toml::from_str(toml_src).unwrap();
+        assert!(c.schedules.is_empty());
+        assert_eq!(on(&c, Weekday::Mon), vec!["05:30"]);
     }
 
     #[test]

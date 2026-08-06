@@ -92,7 +92,11 @@ fn shell_quote(s: &str) -> String {
 pub fn resolve_auto(cfg: &Config, now: chrono::DateTime<Local>) -> Result<Anchor> {
     const EARLY_TOLERANCE_MINS: i64 = 2;
     let date = config::today_edt();
-    let mut anchors = cfg.anchors()?;
+    // Today's own anchor set, so a weekend override resolves against its own times.
+    let mut anchors = cfg.anchors_for(date)?;
+    if anchors.is_empty() {
+        anchors = cfg.anchors()?;
+    }
     anchors.sort();
 
     let mut best: Option<Anchor> = None;

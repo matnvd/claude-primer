@@ -37,8 +37,11 @@ pub fn snapshot(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
     let primes_done = todays.iter().filter(|r| r.outcome.opened_window()).count();
     let had_stale_miss = todays.iter().any(|r| r.outcome == Outcome::MissedTooStale);
 
-    let scheduled_today = cfg.runs_on(crate::config::today_edt())?;
-    let primes_expected = if scheduled_today { cfg.anchors.len() } else { 0 };
+    // Today's own anchor count, which differs from the base set on a day with a
+    // per-day schedule.
+    let todays_anchors = cfg.anchors_for(crate::config::today_edt())?;
+    let scheduled_today = !todays_anchors.is_empty();
+    let primes_expected = todays_anchors.len();
 
     let unit = launchd::unit_status(AGENT_LABEL);
     let agent_healthy = unit.loaded && unit.last_exit.map(|e| e == 0).unwrap_or(true);

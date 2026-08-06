@@ -109,13 +109,14 @@ pub fn parse_workday(s: &str) -> Result<(NaiveTime, NaiveTime)> {
     Ok((start, end))
 }
 
-/// The next time this anchor is due, skipping non-scheduled weekdays. Returns
-/// system-local time, since that is what launchd and pmset both operate in.
+/// The next time this anchor is due. Only days whose schedule actually contains the
+/// anchor count, so a weekday-only anchor is not reported against a weekend that has
+/// its own times. Returns system-local time, which is what launchd and pmset use.
 pub fn next_fire(cfg: &Config, anchor: &Anchor, after: DateTime<Local>) -> Result<DateTime<Local>> {
     let today = crate::config::today_edt();
     for offset in 0..14 {
         let date = today + Duration::days(offset);
-        if !cfg.runs_on(date)? {
+        if !cfg.anchors_for(date)?.contains(anchor) {
             continue;
         }
         let dt = anchor.local_on(date)?;
@@ -123,24 +124,24 @@ pub fn next_fire(cfg: &Config, anchor: &Anchor, after: DateTime<Local>) -> Resul
             return Ok(dt);
         }
     }
-    Err(anyhow!("no scheduled weekday within the next fortnight — check `weekdays`"))
+    Err(anyhow!(
+        "{} is not scheduled within the next fortnight — check `weekdays` and `[schedules]`",
+        anchor.label()
+    ))
 }
 
-/// Every (date, anchor) pair due in the next `days`, in chronological order.
+/// Every (date, anchor) pair due in the next `days`, in chronological order, honouring
+/// per-day schedules.
 pub fn upcoming(cfg: &Config, days: i64) -> Result<Vec<(NaiveDate, Anchor, DateTime<Local>)>> {
     let today = crate::config::today_edt();
     let now = Local::now();
-    let anchors = cfg.anchors()?;
     let mut out = Vec::new();
     for offset in 0..days {
         let date = today + Duration::days(offset);
-        if !cfg.runs_on(date)? {
-            continue;
-        }
-        for a in &anchors {
+        for a in cfg.anchors_for(date)? {
             let dt = a.local_on(date)?;
             if dt > now {
-                out.push((date, *a, dt));
+                out.push((date, a, dt));
             }
         }
     }

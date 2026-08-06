@@ -15,17 +15,6 @@ pub fn daemon_plist_path() -> PathBuf {
     PathBuf::from("/Library/LaunchDaemons").join(format!("{DAEMON_LABEL}.plist"))
 }
 
-fn nearest_date_with_weekday(from: chrono::NaiveDate, want: chrono::Weekday) -> chrono::NaiveDate {
-    let mut d = from;
-    for _ in 0..7 {
-        if d.weekday() == want {
-            return d;
-        }
-        d = d.succ_opt().unwrap_or(d);
-    }
-    from
-}
-
 /// launchd's Weekday is 0-6 with Sunday as 0.
 fn launchd_weekday(w: chrono::Weekday) -> u32 {
     w.num_days_from_sunday()
@@ -47,13 +36,14 @@ pub fn write_agent(cfg: &Config, exe: &str, token: Option<&str>) -> Result<PathB
     // launchd hands jobs a minimal PATH; give `claude` a sane one for anything it shells out to.
     env.insert("PATH".to_string(), Value::String("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()));
 
-    // One StartCalendarInterval entry per (anchor, weekday). A launchd job carries a
-    // single argv for all of its calendar entries, so the anchor cannot be baked into
-    // the arguments — `run --anchor auto` resolves which anchor fired from the clock.
+    // One StartCalendarInterval entry per (weekday, anchor), taking each day's own
+    // anchor set so a weekend schedule emits its own times. A launchd job carries a
+    // single argv across all of its calendar entries, so the anchor cannot be baked
+    // into the arguments — `run --anchor auto` resolves which one fired from the clock.
     let mut jobs: Vec<Value> = Vec::new();
-    for anchor in cfg.anchors()? {
-        for weekday in cfg.weekday_set()? {
-            let probe = nearest_date_with_weekday(config::today_edt(), weekday);
+    for (weekday, anchors) in cfg.active_days()? {
+        let probe = config::nearest_date_with_weekday(config::today_edt(), weekday);
+        for anchor in anchors {
             let (h, m, local_weekday) = anchor.local_hm(probe)?;
             let mut d = BTreeMap::new();
             d.insert("Hour".to_string(), Value::Integer((h as i64).into()));
@@ -231,8 +221,8 @@ mod tests {
     #[test]
     fn nearest_date_lands_on_the_requested_weekday() {
         let start = chrono::NaiveDate::from_ymd_opt(2026, 8, 6).unwrap(); // a Thursday
-        assert_eq!(nearest_date_with_weekday(start, Weekday::Thu), start);
-        assert_eq!(nearest_date_with_weekday(start, Weekday::Sat).weekday(), Weekday::Sat);
+        assert_eq!(config::nearest_date_with_weekday(start, Weekday::Thu), start);
+        assert_eq!(config::nearest_date_with_weekday(start, Weekday::Sat).weekday(), Weekday::Sat);
     }
 
     #[test]

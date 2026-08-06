@@ -72,10 +72,12 @@ Run with **cwd set to a dedicated empty directory** under the tool's data dir, s
 
 **Measured, and the gap is larger than anticipated during planning:**
 
-| | cost | input tokens |
+| | reported cost | input tokens |
 |---|---|---|
 | `--system-prompt` + `--model haiku` only | $0.022613 | 11,139 |
 | full flag set above | **$0.000675** | **240** |
+
+The dollar column is a size proxy only. On a subscription, `total_cost_usd` reports what the request *would* cost at API rates; nothing is billed. A prime spends **quota** — the 5-hour session allowance and the weekly caps — so the input-token column is the operative one.
 
 Two findings, both discovered by inspecting the prime's own transcript after the first real run:
 

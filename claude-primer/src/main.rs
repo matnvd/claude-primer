@@ -45,8 +45,10 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Show anchors, recent runs, unit health, and the current window.
+    /// Show the schedule, recent runs, unit health, and the current window.
     Status,
+    /// Print the path to the config file, for `code $(claude-primer config-path)`.
+    ConfigPath,
     /// One-line readout for Claude Code's status line. Local state only, zero tokens.
     Statusline,
     /// Model the window grid a set of anchors produces. Pure arithmetic, no API calls.
@@ -64,10 +66,28 @@ enum Cmd {
 }
 
 fn main() {
+    restore_default_sigpipe();
     if let Err(e) = real_main() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
+}
+
+/// Rust ignores SIGPIPE at startup, which turns `claude-primer status | head` into a
+/// panic on a broken pipe instead of a quiet exit. Restore the default disposition so
+/// this behaves like any other CLI when its output is truncated.
+fn restore_default_sigpipe() {
+    // SAFETY: setting a signal disposition to SIG_DFL before any threads are spawned.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+const SIGPIPE: i32 = 13;
+const SIG_DFL: usize = 0;
+
+extern "C" {
+    fn signal(sig: i32, handler: usize) -> usize;
 }
 
 fn real_main() -> Result<()> {
@@ -79,6 +99,10 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Status => cmd_status(),
+        Cmd::ConfigPath => {
+            println!("{}", Config::path()?.display());
+            Ok(())
+        }
         Cmd::Statusline => cmd_statusline(),
         Cmd::Simulate { workday, anchors } => cmd_simulate(&workday, anchors),
         Cmd::ArmWakes => cmd_arm_wakes(),
@@ -87,14 +111,40 @@ fn real_main() -> Result<()> {
 }
 
 fn cmd_install(token: Option<String>, no_statusline: bool) -> Result<()> {
-    let mut cfg = Config::load().unwrap_or_default();
+    // Create a commented starter config only if none exists. An existing config is
+    // read and never rewritten, so hand-added comments survive reinstalls.
+    if Config::write_default_if_absent(&resolve_claude_bin()?)? {
+        println!("wrote {}", Config::path()?.display());
+    }
+
+    let cfg = Config::load()?;
 
     if cfg.claude_bin.is_empty() || !std::path::Path::new(&cfg.claude_bin).exists() {
-        cfg.claude_bin = resolve_claude_bin()?;
+        return Err(anyhow!(
+            "claude_bin in {} points at something that doesn't exist:\n  {:?}\n\n\
+             Edit it by hand — this file is never rewritten automatically, so your\n\
+             comments are safe. Try: {}",
+            Config::path()?.display(),
+            cfg.claude_bin,
+            resolve_claude_bin().unwrap_or_else(|_| "(claude not found)".into())
+        ));
     }
     println!("claude binary: {}", cfg.claude_bin);
 
     let exe = std::env::current_exe()?.canonicalize()?.display().to_string();
+
+    // The plist stores this path forever. A build-directory path breaks the moment
+    // the repo is moved or `cargo clean` runs, and the job then fails silently.
+    if exe.contains("/target/release/") || exe.contains("/target/debug/") {
+        return Err(anyhow!(
+            "refusing to install from a build directory:\n  {exe}\n\n\
+             The launchd job stores this path permanently, and it would break on the\n\
+             next `cargo clean` or if you move the repo. Install the binary first:\n\n\
+             \x20 mkdir -p ~/.local/bin\n\
+             \x20 cp {exe} ~/.local/bin/claude-primer\n\
+             \x20 claude-primer install"
+        ));
+    }
 
     let token = match token {
         Some(t) => Some(t),
@@ -107,7 +157,6 @@ fn cmd_install(token: Option<String>, no_statusline: bool) -> Result<()> {
         );
     }
 
-    cfg.save()?;
     std::fs::create_dir_all(config::prime_cwd()?)?;
 
     let agent = launchd::write_agent(&cfg, &exe, token.as_deref())?;
@@ -207,6 +256,10 @@ fn cmd_status() -> Result<()> {
     let now = Local::now();
 
     println!("claude-primer");
+    // Printed first because the config lives outside any project directory, so it is
+    // otherwise easy to miss.
+    println!("  config          {}", Config::path()?.display());
+    println!("  logs            {}", config::runs_log()?.display());
     println!("  claude binary   {}", cfg.claude_bin);
     println!("  model           {}", cfg.model);
     println!("  on missed       {:?} (grace {}m)", cfg.on_missed, cfg.grace_minutes);
@@ -214,20 +267,39 @@ fn cmd_status() -> Result<()> {
     // Anchors in both zones: EDT is what you configured, system-local is what launchd
     // and pmset actually fire on.
     let sys_offset = now.offset().local_minus_utc() / 3600;
-    println!("\n  anchors (EDT declared → system-local UTC{sys_offset:+})");
+    println!("\n  schedule (EDT declared → system-local UTC{sys_offset:+})");
     let today = config::today_edt();
-    for a in cfg.anchors()? {
-        let local = a.local_on(today)?;
-        let next = window::next_fire(&cfg, &a, now)?;
+    for (weekday, anchors) in cfg.active_days()? {
+        let probe = config::nearest_date_with_weekday(today, weekday);
+        let rendered: Vec<String> = anchors
+            .iter()
+            .map(|a| {
+                a.local_on(probe)
+                    .map(|l| format!("{} → {}", a.label(), l.format("%H:%M")))
+                    .unwrap_or_else(|_| a.label())
+            })
+            .collect();
+        let overridden = cfg
+            .schedules
+            .keys()
+            .any(|d| config::parse_weekday(d).map(|w| w == weekday).unwrap_or(false));
         println!(
-            "    {} EDT  →  {} local     next: {}",
-            a.label(),
-            local.format("%H:%M"),
-            next.format("%a %d %b %H:%M")
+            "    {:<4} {}{}",
+            weekday.to_string(),
+            rendered.join("   "),
+            if overridden { "   (per-day override)" } else { "" }
         );
+    }
+    if cfg.active_days()?.is_empty() {
+        println!("    nothing scheduled — check `weekdays` and `[schedules]`");
     }
     if sys_offset != -4 {
         println!("    note: system zone differs from EDT; the conversion above is applied for you.");
+    }
+
+    println!("\n  next up");
+    for (_, a, dt) in window::upcoming(&cfg, 14)?.into_iter().take(4) {
+        println!("    {}  {} EDT", dt.format("%a %d %b %H:%M local"), a.label());
     }
 
     match state::last_window_start()? {

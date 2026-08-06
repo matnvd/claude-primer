@@ -1,7 +1,7 @@
 use crate::config::{self, Config, PMSET_OWNER};
 use crate::state::{ArmedWake, WakeLedger};
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Duration, Local};
+use chrono::{DateTime, Datelike, Duration, Local};
 use std::process::Command;
 
 const PMSET: &str = "/usr/bin/pmset";
@@ -32,30 +32,30 @@ pub fn arm(cfg: &Config) -> Result<WakeLedger> {
         let _ = cancel_one(&w.datetime);
     }
 
-    let anchors = cfg.anchors()?;
-    let earliest = anchors.first().copied().ok_or_else(|| anyhow!("no anchors configured"))?;
+    // The single repeating slot goes to the base schedule's earliest anchor — the
+    // overnight one that genuinely needs a wake. Per-day overrides (a weekend with
+    // its own times) cannot share that slot, so their anchors are covered by one-time
+    // events below, along with every non-earliest anchor.
+    let base_anchors = cfg.anchors()?;
+    let earliest = base_anchors.iter().min().copied().ok_or_else(|| anyhow!("no anchors configured"))?;
+    let base_weekdays = cfg.weekday_set()?;
 
-    // The one repeating slot: earliest anchor, on the scheduled weekdays.
-    let probe = config::today_edt();
-    let (h, m, _) = earliest.local_hm(probe)?;
+    let (h, m, _) = earliest.local_hm(config::today_edt())?;
     let time_local = format!("{h:02}:{m:02}:00");
-    let weekdays: String = cfg
-        .weekday_set()?
-        .into_iter()
-        .map(config::pmset_weekday_char)
-        .collect();
+    let weekdays: String = base_weekdays.iter().copied().map(config::pmset_weekday_char).collect();
     set_repeat(&time_local, &weekdays)?;
     ledger.repeat_time_local = Some(time_local);
     ledger.repeat_weekdays = Some(weekdays);
 
-    // One-time wakes for the remaining anchors across the horizon.
+    // One-time wakes for everything the repeating slot does not already cover.
     let now = Local::now();
     for offset in 0..HORIZON_DAYS {
         let date = config::today_edt() + Duration::days(offset);
-        if !cfg.runs_on(date)? {
-            continue;
-        }
-        for anchor in anchors.iter().skip(1) {
+        let covered_by_repeat = base_weekdays.contains(&date.weekday());
+        for anchor in cfg.anchors_for(date)? {
+            if covered_by_repeat && anchor == earliest {
+                continue;
+            }
             let due = anchor.local_on(date)?;
             let wake_at = due - Duration::minutes(WAKE_LEAD);
             if wake_at <= now {
