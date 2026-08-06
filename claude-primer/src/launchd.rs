@@ -1,6 +1,5 @@
 use crate::config::{self, Config, AGENT_LABEL, DAEMON_LABEL};
 use anyhow::{anyhow, Context, Result};
-use chrono::Datelike;
 use plist::Value;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -41,10 +40,11 @@ pub fn write_agent(cfg: &Config, exe: &str, token: Option<&str>) -> Result<PathB
     // single argv across all of its calendar entries, so the anchor cannot be baked
     // into the arguments — `run --anchor auto` resolves which one fired from the clock.
     let mut jobs: Vec<Value> = Vec::new();
+    let mode = cfg.mode()?;
     for (weekday, anchors) in cfg.active_days()? {
-        let probe = config::nearest_date_with_weekday(config::today_edt(), weekday);
+        let probe = config::nearest_date_with_weekday(cfg.today()?, weekday);
         for anchor in anchors {
-            let (h, m, local_weekday) = anchor.local_hm(probe)?;
+            let (h, m, local_weekday) = anchor.local_hm(probe, mode)?;
             let mut d = BTreeMap::new();
             d.insert("Hour".to_string(), Value::Integer((h as i64).into()));
             d.insert("Minute".to_string(), Value::Integer((m as i64).into()));
@@ -179,7 +179,7 @@ pub fn unit_status(label: &str) -> UnitStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Weekday;
+    use chrono::{Datelike, Weekday};
 
     #[test]
     fn launchd_weekdays_are_sunday_zero() {

@@ -39,7 +39,7 @@ pub fn snapshot(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
 
     // Today's own anchor count, which differs from the base set on a day with a
     // per-day schedule.
-    let todays_anchors = cfg.anchors_for(crate::config::today_edt())?;
+    let todays_anchors = cfg.anchors_for(cfg.today()?)?;
     let scheduled_today = !todays_anchors.is_empty();
     let primes_expected = todays_anchors.len();
 

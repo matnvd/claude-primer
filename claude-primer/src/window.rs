@@ -33,7 +33,6 @@ pub struct WastedAnchor {
 pub struct Simulation {
     pub windows: Vec<SimWindow>,
     pub wasted: Vec<WastedAnchor>,
-    pub workday: (NaiveTime, NaiveTime),
     pub workday_minutes: i64,
     pub covered_minutes: i64,
 }
@@ -94,7 +93,7 @@ pub fn simulate(anchors: &[Anchor], workday: (NaiveTime, NaiveTime)) -> Simulati
     let workday_minutes = (day_end - day_start).num_minutes().max(0);
     let covered_minutes: i64 = windows.iter().map(|w| w.covers_minutes).sum::<i64>().min(workday_minutes);
 
-    Simulation { windows, wasted, workday, workday_minutes, covered_minutes }
+    Simulation { windows, wasted, workday_minutes, covered_minutes }
 }
 
 pub fn parse_workday(s: &str) -> Result<(NaiveTime, NaiveTime)> {
@@ -109,37 +108,17 @@ pub fn parse_workday(s: &str) -> Result<(NaiveTime, NaiveTime)> {
     Ok((start, end))
 }
 
-/// The next time this anchor is due. Only days whose schedule actually contains the
-/// anchor count, so a weekday-only anchor is not reported against a weekend that has
-/// its own times. Returns system-local time, which is what launchd and pmset use.
-pub fn next_fire(cfg: &Config, anchor: &Anchor, after: DateTime<Local>) -> Result<DateTime<Local>> {
-    let today = crate::config::today_edt();
-    for offset in 0..14 {
-        let date = today + Duration::days(offset);
-        if !cfg.anchors_for(date)?.contains(anchor) {
-            continue;
-        }
-        let dt = anchor.local_on(date)?;
-        if dt > after {
-            return Ok(dt);
-        }
-    }
-    Err(anyhow!(
-        "{} is not scheduled within the next fortnight — check `weekdays` and `[schedules]`",
-        anchor.label()
-    ))
-}
-
 /// Every (date, anchor) pair due in the next `days`, in chronological order, honouring
 /// per-day schedules.
 pub fn upcoming(cfg: &Config, days: i64) -> Result<Vec<(NaiveDate, Anchor, DateTime<Local>)>> {
-    let today = crate::config::today_edt();
+    let today = cfg.today()?;
+    let mode = cfg.mode()?;
     let now = Local::now();
     let mut out = Vec::new();
     for offset in 0..days {
         let date = today + Duration::days(offset);
         for a in cfg.anchors_for(date)? {
-            let dt = a.local_on(date)?;
+            let dt = a.local_on(date, mode)?;
             if dt > now {
                 out.push((date, a, dt));
             }

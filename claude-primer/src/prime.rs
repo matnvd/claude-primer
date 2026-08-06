@@ -91,7 +91,8 @@ fn shell_quote(s: &str) -> String {
 /// missed, which is exactly what the staleness guard needs to see.
 pub fn resolve_auto(cfg: &Config, now: chrono::DateTime<Local>) -> Result<Anchor> {
     const EARLY_TOLERANCE_MINS: i64 = 2;
-    let date = config::today_edt();
+    let date = cfg.today()?;
+    let mode = cfg.mode()?;
     // Today's own anchor set, so a weekend override resolves against its own times.
     let mut anchors = cfg.anchors_for(date)?;
     if anchors.is_empty() {
@@ -101,7 +102,7 @@ pub fn resolve_auto(cfg: &Config, now: chrono::DateTime<Local>) -> Result<Anchor
 
     let mut best: Option<Anchor> = None;
     for a in &anchors {
-        let due = a.local_on(date)?;
+        let due = a.local_on(date, mode)?;
         if (now - due).num_minutes() >= -EARLY_TOLERANCE_MINS {
             best = Some(*a);
         }
@@ -126,7 +127,8 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
     // A non-HH:MM label (e.g. `--anchor test`) is a manual invocation: the schedule
     // guards below don't apply because there is no scheduled time to be late for.
     if let (Some(anchor), false) = (scheduled, args.force) {
-        let date = config::today_edt();
+        let date = cfg.today()?;
+        let mode = cfg.mode()?;
 
         if !cfg.runs_on(date)? {
             let rec = RunRecord::new(&args.anchor, Outcome::SkippedNotScheduled);
@@ -138,7 +140,7 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
         // launchd's StartCalendarInterval catches up after the Mac was off or asleep.
         // Priming now would open a window at the wrong time and shift every later
         // boundary, which is worse than skipping.
-        let due = anchor.local_on(date)?;
+        let due = anchor.local_on(date, mode)?;
         let late_by = (now - due).num_minutes();
         if late_by > cfg.grace_minutes && cfg.on_missed == OnMissed::Skip {
             let mut rec = RunRecord::new(&args.anchor, Outcome::MissedTooStale);
@@ -159,7 +161,7 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
 
     if args.dry_run {
         let mut rec = RunRecord::new(&args.anchor, Outcome::DryRun);
-        rec.scheduled_for = scheduled.and_then(|a| a.local_on(config::today_edt()).ok());
+        rec.scheduled_for = scheduled.and_then(|a| cfg.today().ok().zip(cfg.mode().ok()).and_then(|(d, m)| a.local_on(d, m).ok()));
         println!("would run (cwd {}):\n  {}", config::prime_cwd()?.display(), render_command(cfg));
         state::append_run(&rec)?;
         return Ok(Outcome::DryRun);
@@ -190,7 +192,7 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
 
     let mut rec = RunRecord::new(&args.anchor, if is_error { Outcome::Error } else { Outcome::Ok });
     rec.duration_ms = Some(elapsed);
-    rec.scheduled_for = scheduled.and_then(|a| a.local_on(config::today_edt()).ok());
+    rec.scheduled_for = scheduled.and_then(|a| cfg.today().ok().zip(cfg.mode().ok()).and_then(|(d, m)| a.local_on(d, m).ok()));
     if let Some(v) = &parsed {
         rec.cost_usd = v.get("total_cost_usd").and_then(|c| c.as_f64());
         rec.session_id = v.get("session_id").and_then(|s| s.as_str()).map(str::to_string);
@@ -336,10 +338,12 @@ mod tests {
         assert_eq!(truncate("abcdef", 3), "abc…");
     }
 
+    /// A wall-clock time today on this Mac, which is exactly how anchors are read
+    /// under the default `timezone = "local"`.
     fn at(h: u32, m: u32) -> chrono::DateTime<Local> {
         use chrono::TimeZone;
-        let d = config::today_edt().and_hms_opt(h, m, 0).unwrap();
-        config::edt().from_local_datetime(&d).unwrap().with_timezone(&Local)
+        let d = Local::now().date_naive().and_hms_opt(h, m, 0).unwrap();
+        Local.from_local_datetime(&d).earliest().unwrap()
     }
 
     #[test]

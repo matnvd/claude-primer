@@ -264,19 +264,31 @@ fn cmd_status() -> Result<()> {
     println!("  model           {}", cfg.model);
     println!("  on missed       {:?} (grace {}m)", cfg.on_missed, cfg.grace_minutes);
 
-    // Anchors in both zones: EDT is what you configured, system-local is what launchd
-    // and pmset actually fire on.
+    // Under SystemLocal the configured times are already what the Mac's clock reads,
+    // so one column says everything. A fixed offset needs both, since launchd fires
+    // in the system zone and the two differ.
+    let mode = cfg.mode()?;
     let sys_offset = now.offset().local_minus_utc() / 3600;
-    println!("\n  schedule (EDT declared → system-local UTC{sys_offset:+})");
-    let today = config::today_edt();
+    match mode {
+        config::TimeMode::SystemLocal => {
+            println!("\n  schedule (this Mac's clock, UTC{sys_offset:+})")
+        }
+        config::TimeMode::Fixed(_) => println!(
+            "\n  schedule ({} declared → system-local UTC{sys_offset:+})",
+            cfg.timezone
+        ),
+    }
+    let today = cfg.today()?;
     for (weekday, anchors) in cfg.active_days()? {
         let probe = config::nearest_date_with_weekday(today, weekday);
         let rendered: Vec<String> = anchors
             .iter()
-            .map(|a| {
-                a.local_on(probe)
+            .map(|a| match mode {
+                config::TimeMode::SystemLocal => a.label(),
+                config::TimeMode::Fixed(_) => a
+                    .local_on(probe, mode)
                     .map(|l| format!("{} → {}", a.label(), l.format("%H:%M")))
-                    .unwrap_or_else(|_| a.label())
+                    .unwrap_or_else(|_| a.label()),
             })
             .collect();
         let overridden = cfg
@@ -293,13 +305,26 @@ fn cmd_status() -> Result<()> {
     if cfg.active_days()?.is_empty() {
         println!("    nothing scheduled — check `weekdays` and `[schedules]`");
     }
-    if sys_offset != -4 {
-        println!("    note: system zone differs from EDT; the conversion above is applied for you.");
+    if matches!(mode, config::TimeMode::Fixed(_)) {
+        println!(
+            "    note: {:?} is a fixed offset and does not shift with daylight saving.",
+            cfg.timezone
+        );
     }
 
     println!("\n  next up");
     for (_, a, dt) in window::upcoming(&cfg, 14)?.into_iter().take(4) {
-        println!("    {}  {} EDT", dt.format("%a %d %b %H:%M local"), a.label());
+        // Under a fixed offset the configured label and the local firing time differ,
+        // so show both. Under SystemLocal they are the same and one is enough.
+        match mode {
+            config::TimeMode::SystemLocal => println!("    {}", dt.format("%a %d %b %H:%M")),
+            config::TimeMode::Fixed(_) => println!(
+                "    {}   (declared {} {})",
+                dt.format("%a %d %b %H:%M"),
+                a.label(),
+                cfg.timezone
+            ),
+        }
     }
 
     match state::last_window_start()? {
@@ -398,8 +423,9 @@ fn cmd_simulate(workday: &str, anchors: Option<Vec<String>>) -> Result<()> {
             _ => "outside your workday".to_string(),
         };
         println!(
-            "  window {}  {} ──────── {}   {}",
+            "  window {} (from {})  {} ──────── {}   {}",
             i + 1,
+            w.opened_by.label(),
             w.start.format("%H:%M"),
             w.end.format("%H:%M"),
             covered

@@ -4,14 +4,56 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Anchors are declared in fixed EDT (UTC-4) with no automatic DST adjustment.
-/// `StartCalendarInterval` has no timezone field — launchd fires in the *system*
-/// zone — so every anchor is converted to system-local before it reaches a plist
-/// or a `pmset` datetime. See `Anchor::local_on`.
-pub const EDT_OFFSET_SECS: i32 = 4 * 3600;
+/// How the times in `anchors` and `[schedules]` should be read.
+///
+/// `StartCalendarInterval` has no timezone field — launchd always fires in the
+/// *system* zone — so anything that isn't already system-local has to be converted
+/// before it reaches a plist or a `pmset` datetime. See `Anchor::local_on`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeMode {
+    /// Anchors are wall-clock times on this Mac. No conversion, and macOS handles
+    /// DST, so 05:30 means 05:30 on the menu-bar clock all year.
+    SystemLocal,
+    /// Anchors are in a fixed UTC offset with no DST shifting, so a summer-declared
+    /// time drifts by an hour once the local zone leaves daylight saving.
+    Fixed(FixedOffset),
+}
 
-pub fn edt() -> FixedOffset {
-    FixedOffset::west_opt(EDT_OFFSET_SECS).expect("EDT offset is in range")
+/// `local`/`system` reads anchors as this Mac's own clock. A fixed offset can still
+/// be requested with `EDT`, `EST`, or a `UTC-4` / `UTC+5:30` form.
+pub fn parse_time_mode(tz: &str) -> Result<TimeMode> {
+    let t = tz.trim();
+    let lower = t.to_ascii_lowercase();
+    match lower.as_str() {
+        "local" | "system" => return Ok(TimeMode::SystemLocal),
+        "edt" => return Ok(TimeMode::Fixed(fixed_hours(-4)?)),
+        "est" | "cdt" => return Ok(TimeMode::Fixed(fixed_hours(-5)?)),
+        "utc" | "gmt" | "z" => return Ok(TimeMode::Fixed(fixed_hours(0)?)),
+        _ => {}
+    }
+    if let Some(rest) = lower.strip_prefix("utc").or_else(|| lower.strip_prefix("gmt")) {
+        let rest = rest.trim();
+        let (sign, digits) = match rest.strip_prefix('-') {
+            Some(d) => (-1, d),
+            None => (1, rest.strip_prefix('+').unwrap_or(rest)),
+        };
+        let (h, m) = match digits.split_once(':') {
+            Some((h, m)) => (h.parse::<i32>()?, m.parse::<i32>()?),
+            None => (digits.parse::<i32>()?, 0),
+        };
+        let secs = sign * (h * 3600 + m * 60);
+        return FixedOffset::east_opt(secs)
+            .map(TimeMode::Fixed)
+            .ok_or_else(|| anyhow!("timezone offset {t:?} is out of range"));
+    }
+    Err(anyhow!(
+        "unrecognized timezone {t:?} — use \"local\" for this Mac's clock, or a fixed \
+         offset such as \"EDT\" or \"UTC-4\""
+    ))
+}
+
+fn fixed_hours(h: i32) -> Result<FixedOffset> {
+    FixedOffset::east_opt(h * 3600).ok_or_else(|| anyhow!("offset {h} out of range"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,7 +106,7 @@ impl Default for Config {
             // No weekend entries by default; add e.g. Sat = ["09:00", "14:00"] to opt in.
             schedules: BTreeMap::new(),
             model: "haiku".into(),
-            timezone: "EDT".into(),
+            timezone: "local".into(),
             notify_on: NotifyOn::Failure,
             on_missed: OnMissed::Skip,
             grace_minutes: 20,
@@ -87,6 +129,7 @@ impl Config {
     /// Serializing the struct discards every comment in the file, so this is only
     /// used to create a config that does not exist yet. Never call it to "update" a
     /// config the user has edited — see `write_default_if_absent`.
+    #[cfg(test)]
     pub fn save(&self) -> Result<()> {
         let p = Self::path()?;
         std::fs::create_dir_all(p.parent().unwrap())?;
@@ -115,16 +158,27 @@ impl Config {
         self.weekdays.iter().map(|d| parse_weekday(d)).collect()
     }
 
-    /// The anchors that apply on a given EDT-local date, sorted.
+    /// How to read the times in `anchors` and `[schedules]`.
+    pub fn mode(&self) -> Result<TimeMode> {
+        parse_time_mode(&self.timezone)
+    }
+
+    /// Today's date in the zone the anchors are declared in.
+    pub fn today(&self) -> Result<NaiveDate> {
+        Ok(match self.mode()? {
+            TimeMode::SystemLocal => Local::now().date_naive(),
+            TimeMode::Fixed(off) => Local::now().with_timezone(&off).date_naive(),
+        })
+    }
+
+    /// The anchors that apply on a given date, sorted.
     ///
     /// A `[schedules]` entry for that weekday wins outright, and makes the day active
     /// even when it is absent from `weekdays` — which is how a weekend gets its own
     /// times. Otherwise the base `anchors` apply if the day is in `weekdays`. Neither
     /// case matching means the day is off.
-    ///
-    /// The weekday is taken in EDT because that is the zone anchors are declared in.
-    pub fn anchors_for(&self, date_edt: NaiveDate) -> Result<Vec<Anchor>> {
-        let want = date_edt.weekday();
+    pub fn anchors_for(&self, date: NaiveDate) -> Result<Vec<Anchor>> {
+        let want = date.weekday();
         for (day, times) in &self.schedules {
             if parse_weekday(day)? == want {
                 let mut a: Vec<Anchor> = times.iter().map(|s| Anchor::parse(s)).collect::<Result<_>>()?;
@@ -141,8 +195,8 @@ impl Config {
     }
 
     /// Whether anything is scheduled on this date.
-    pub fn runs_on(&self, date_edt: NaiveDate) -> Result<bool> {
-        Ok(!self.anchors_for(date_edt)?.is_empty())
+    pub fn runs_on(&self, date: NaiveDate) -> Result<bool> {
+        Ok(!self.anchors_for(date)?.is_empty())
     }
 
     /// Every weekday that has at least one anchor, with the anchors that apply.
@@ -151,7 +205,7 @@ impl Config {
             Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu,
             Weekday::Fri, Weekday::Sat, Weekday::Sun,
         ];
-        let today = today_edt();
+        let today = self.today()?;
         let mut out = Vec::new();
         for w in ALL {
             let probe = nearest_date_with_weekday(today, w);
@@ -188,8 +242,7 @@ pub fn default_config_toml(claude_bin: &str) -> String {
 # Absolute path — launchd gives jobs a minimal PATH that excludes ~/.local/bin.
 claude_bin = "{claude_bin}"
 
-# Times to send a priming prompt, declared in EDT (fixed UTC-4, no DST shifting).
-# `status` shows each one converted to your Mac's clock.
+# Times to send a priming prompt, as they read on this Mac's clock.
 anchors  = ["05:30", "10:30", "15:30"]
 
 # Days the `anchors` above apply to. Days listed in neither this nor [schedules]
@@ -199,7 +252,10 @@ weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 # haiku is the cheapest and stays off the Sonnet-specific weekly cap.
 model = "haiku"
 
-timezone = "EDT"
+# "local" reads the times above as this Mac's own clock, so macOS handles daylight
+# saving and 05:30 stays 05:30 on the menu-bar clock all year. A fixed offset such
+# as "EDT" or "UTC-4" is also accepted, but does not shift with DST.
+timezone = "local"
 
 # When to post a macOS notification: "failure" | "never" | "always".
 # On "failure", silence means everything worked.
@@ -245,22 +301,39 @@ impl Anchor {
         format!("{:02}:{:02}", self.hour, self.minute)
     }
 
-    /// This anchor on `date_edt`, as an instant, then expressed in system-local time.
-    pub fn local_on(&self, date_edt: NaiveDate) -> Result<DateTime<Local>> {
-        let naive = date_edt
+    /// This anchor on `date`, as an instant in system-local time.
+    ///
+    /// Under `SystemLocal` the time is taken at face value, so no conversion happens
+    /// and macOS owns DST. Under `Fixed` the time is anchored to that offset and then
+    /// re-expressed locally, which is what launchd and pmset need.
+    pub fn local_on(&self, date: NaiveDate, mode: TimeMode) -> Result<DateTime<Local>> {
+        let naive = date
             .and_hms_opt(self.hour, self.minute, 0)
             .ok_or_else(|| anyhow!("invalid anchor time {}", self.label()))?;
-        let in_edt = edt()
-            .from_local_datetime(&naive)
-            .single()
-            .ok_or_else(|| anyhow!("ambiguous EDT time {}", self.label()))?;
-        Ok(in_edt.with_timezone(&Local))
+        match mode {
+            TimeMode::SystemLocal => Local
+                .from_local_datetime(&naive)
+                .earliest()
+                // A spring-forward gap can make a wall-clock time not exist locally.
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{} does not exist on {} in this timezone (daylight-saving gap)",
+                        self.label(),
+                        date
+                    )
+                }),
+            TimeMode::Fixed(off) => off
+                .from_local_datetime(&naive)
+                .single()
+                .map(|dt| dt.with_timezone(&Local))
+                .ok_or_else(|| anyhow!("ambiguous time {}", self.label())),
+        }
     }
 
-    /// The same wall-clock time as the system would express it, e.g. 05:30 EDT on a
-    /// UTC-3 machine is 06:30 local. This is what goes into StartCalendarInterval.
-    pub fn local_hm(&self, date_edt: NaiveDate) -> Result<(u32, u32, Weekday)> {
-        let dt = self.local_on(date_edt)?;
+    /// The hour, minute, and weekday as the *system* clock expresses them. This is
+    /// what goes into StartCalendarInterval.
+    pub fn local_hm(&self, date: NaiveDate, mode: TimeMode) -> Result<(u32, u32, Weekday)> {
+        let dt = self.local_on(date, mode)?;
         Ok((
             dt.format("%H").to_string().parse()?,
             dt.format("%M").to_string().parse()?,
@@ -295,9 +368,6 @@ pub fn pmset_weekday_char(w: Weekday) -> char {
     }
 }
 
-pub fn today_edt() -> NaiveDate {
-    Local::now().with_timezone(&edt()).date_naive()
-}
 
 pub fn home() -> Result<PathBuf> {
     std::env::var_os("HOME")
@@ -350,15 +420,61 @@ mod tests {
 
     #[test]
     fn edt_is_utc_minus_four() {
-        assert_eq!(edt().local_minus_utc(), -4 * 3600);
+        // "local" is the default; fixed offsets remain available for anyone who wants
+        // them, and must not shift with DST.
+        assert_eq!(parse_time_mode("local").unwrap(), TimeMode::SystemLocal);
+        assert_eq!(parse_time_mode("system").unwrap(), TimeMode::SystemLocal);
+        match parse_time_mode("EDT").unwrap() {
+            TimeMode::Fixed(o) => assert_eq!(o.local_minus_utc(), -4 * 3600),
+            _ => panic!("EDT should be a fixed offset"),
+        }
+        match parse_time_mode("UTC-4").unwrap() {
+            TimeMode::Fixed(o) => assert_eq!(o.local_minus_utc(), -4 * 3600),
+            _ => panic!("UTC-4 should be a fixed offset"),
+        }
+        match parse_time_mode("UTC+5:30").unwrap() {
+            TimeMode::Fixed(o) => assert_eq!(o.local_minus_utc(), 5 * 3600 + 1800),
+            _ => panic!("UTC+5:30 should be a fixed offset"),
+        }
+        assert!(parse_time_mode("Mars/Olympus").is_err());
     }
 
     #[test]
-    fn anchor_converts_to_a_fixed_instant() {
-        // 05:30 EDT is 09:30 UTC regardless of what the system zone is.
+    fn a_fixed_offset_anchor_pins_an_absolute_instant() {
+        // 05:30 at UTC-4 is 09:30 UTC, whatever the system zone happens to be.
         let date = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
-        let dt = Anchor::parse("05:30").unwrap().local_on(date).unwrap();
+        let mode = parse_time_mode("EDT").unwrap();
+        let dt = Anchor::parse("05:30").unwrap().local_on(date, mode).unwrap();
         assert_eq!(dt.naive_utc().format("%H:%M").to_string(), "09:30");
+    }
+
+    #[test]
+    fn a_local_anchor_reads_as_the_macs_own_clock() {
+        // The point of timezone = "local": no conversion, so the configured time is
+        // what the menu-bar clock shows, and macOS owns DST.
+        let date = Local::now().date_naive();
+        let dt = Anchor::parse("05:30")
+            .unwrap()
+            .local_on(date, TimeMode::SystemLocal)
+            .unwrap();
+        assert_eq!(dt.format("%H:%M").to_string(), "05:30");
+        assert_eq!(dt.date_naive(), date);
+    }
+
+    #[test]
+    fn local_and_fixed_disagree_when_the_system_zone_is_not_the_fixed_one() {
+        // Guards the whole reason TimeMode exists: these must not be interchangeable
+        // unless the machine happens to sit at the fixed offset.
+        let date = Local::now().date_naive();
+        let a = Anchor::parse("05:30").unwrap();
+        let local = a.local_on(date, TimeMode::SystemLocal).unwrap();
+        let fixed = a.local_on(date, parse_time_mode("EDT").unwrap()).unwrap();
+        let sys_offset = Local::now().offset().local_minus_utc();
+        if sys_offset == -4 * 3600 {
+            assert_eq!(local, fixed);
+        } else {
+            assert_ne!(local, fixed);
+        }
     }
 
     fn on(cfg: &Config, weekday: Weekday) -> Vec<String> {

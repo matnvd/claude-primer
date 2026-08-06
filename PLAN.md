@@ -25,8 +25,8 @@ Since this machine *is* shut down and restarted periodically, missed anchors are
 |---|---|
 | Language | Rust (single static binary, no runtime for launchd to depend on) |
 | Host | Mac-only: LaunchAgent + `pmset` wake |
-| Strategy | Fixed clock anchors (default `05:30`, `10:30`, `15:30` **EDT**, Mon–Fri) |
-| Timezone | Fixed EDT (UTC-4), converted to system-local when writing plists; no auto-DST |
+| Strategy | Fixed clock anchors (default `05:30`, `10:30`, `15:30`, Mon–Fri), per-day overrides supported |
+| Timezone | `local` — anchors read as this Mac's clock, so macOS handles DST. Fixed offsets still available |
 | Missed anchors | Skipped past a 20-minute grace, rather than fired late and misaligned |
 | Visibility | Claude Code status line (0 tokens, local state only) + failure-only notifications; menu bar deferred |
 | Auth | Local `CLAUDE_CODE_OAUTH_TOKEN` in the plist, mode `0600` |
@@ -157,7 +157,7 @@ claude_bin    = "/Users/<you>/.local/bin/claude"   # resolved at install, not as
 anchors       = ["05:30", "10:30", "15:30"]
 weekdays      = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 model         = "haiku"
-timezone      = "EDT"                              # fixed UTC-4; no automatic DST shifting
+timezone      = "local"                            # this Mac's clock; macOS handles DST
 notify_on     = "failure"                          # "failure" | "never" | "always"
 on_missed     = "skip"                             # "skip" | "shift"
 grace_minutes = 20
@@ -167,9 +167,9 @@ grace_minutes = 20
 
 Anchors are declared in **EDT (fixed UTC-4)**. No automatic DST adjustment — offsets are handled manually.
 
-This needs explicit conversion because **`StartCalendarInterval` has no timezone field**: launchd fires it in whatever the *system* timezone is. If the system reports `Atlantic/Bermuda` (UTC-3), one hour off EDT, then a `05:30` EDT anchor must be written into the plist as `06:30` system-local, and `pmset schedule` datetimes converted the same way.
+`timezone = "local"` (the default) reads anchors as **this Mac's own clock** — no conversion, and macOS owns daylight saving, so times don't drift across a DST transition. Fixed offsets (`EDT`, `UTC-4`, `UTC+5:30`) remain available for pinning to an absolute zone, but do not shift with DST.
 
-`status` displays every anchor in **both** EDT and system-local time, and warns when the system timezone changes — otherwise a laptop that moves between zones would silently re-point every anchor.
+The mode exists because **`StartCalendarInterval` has no timezone field**: launchd always fires in the *system* zone, so anything not already system-local must be converted before it reaches the plist or a `pmset` datetime. Under a fixed offset `status` shows both the declared time and the local time it fires at; under `local` one column says everything.
 
 ### Missed anchors (the shutdown case)
 

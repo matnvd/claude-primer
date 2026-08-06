@@ -44,8 +44,14 @@ Requires macOS and a Claude Pro/Max/Team/Enterprise subscription.
 
 ```sh
 cargo build --release
-./target/release/claude-primer install
+mkdir -p ~/.local/bin
+cp target/release/claude-primer ~/.local/bin/claude-primer
+
+claude setup-token          # browser login; copy the token it prints
+claude-primer install       # paste the token, then one sudo prompt
 ```
+
+Install the binary to a stable path first — `install` refuses to run from `target/`, because the launchd job stores the binary's absolute path permanently and a build-directory path breaks on the next `cargo clean`.
 
 `install` will:
 
@@ -181,7 +187,7 @@ claude_bin    = "/Users/you/.local/bin/claude"   # resolved at install
 anchors       = ["05:30", "10:30", "15:30"]      # the base set
 weekdays      = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 model         = "haiku"
-timezone      = "EDT"                            # fixed UTC-4, no automatic DST
+timezone      = "local"                          # this Mac's clock; macOS handles DST
 notify_on     = "failure"                        # "failure" | "never" | "always"
 on_missed     = "skip"                           # "skip" | "shift"
 grace_minutes = 20
@@ -262,9 +268,11 @@ One consequence worth knowing: `pmset` allows only **one** repeating wake event,
 
 ### Timezone
 
-Anchors are declared in **EDT (fixed UTC-4)** with no automatic DST adjustment.
+`timezone = "local"` (the default) reads every time as **this Mac's own clock**. `05:30` in the config means 05:30 on the menu-bar clock, no conversion, and **macOS handles daylight saving** — so the times don't drift across a DST transition.
 
-This matters because `StartCalendarInterval` has no timezone field — launchd fires it in whatever the *system* timezone is. If your Mac is set to `Atlantic/Bermuda` (UTC-3), a `05:30` EDT anchor is written into the plist as `06:30` local. `status` always shows both so there's no ambiguity, and warns if the system timezone changes underneath you.
+A fixed offset is also accepted if you'd rather pin times to an absolute zone: `EDT`, `EST`, `UTC`, or an explicit `UTC-4` / `UTC+5:30`. These do **not** shift with DST, so a time declared in summer fires an hour off once the local zone leaves daylight saving. `status` labels the mode and, for a fixed offset, shows both the declared time and the local time it actually fires at.
+
+This distinction exists because `StartCalendarInterval` has no timezone field — launchd always fires in the *system* zone, so anything that isn't already system-local has to be converted before it reaches the plist.
 
 ---
 

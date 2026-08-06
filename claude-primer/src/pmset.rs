@@ -40,7 +40,8 @@ pub fn arm(cfg: &Config) -> Result<WakeLedger> {
     let earliest = base_anchors.iter().min().copied().ok_or_else(|| anyhow!("no anchors configured"))?;
     let base_weekdays = cfg.weekday_set()?;
 
-    let (h, m, _) = earliest.local_hm(config::today_edt())?;
+    let mode = cfg.mode()?;
+    let (h, m, _) = earliest.local_hm(cfg.today()?, mode)?;
     let time_local = format!("{h:02}:{m:02}:00");
     let weekdays: String = base_weekdays.iter().copied().map(config::pmset_weekday_char).collect();
     set_repeat(&time_local, &weekdays)?;
@@ -50,13 +51,13 @@ pub fn arm(cfg: &Config) -> Result<WakeLedger> {
     // One-time wakes for everything the repeating slot does not already cover.
     let now = Local::now();
     for offset in 0..HORIZON_DAYS {
-        let date = config::today_edt() + Duration::days(offset);
+        let date = cfg.today()? + Duration::days(offset);
         let covered_by_repeat = base_weekdays.contains(&date.weekday());
         for anchor in cfg.anchors_for(date)? {
             if covered_by_repeat && anchor == earliest {
                 continue;
             }
-            let due = anchor.local_on(date)?;
+            let due = anchor.local_on(date, mode)?;
             let wake_at = due - Duration::minutes(WAKE_LEAD);
             if wake_at <= now {
                 continue;
