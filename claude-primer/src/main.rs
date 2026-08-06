@@ -1,0 +1,434 @@
+mod config;
+mod launchd;
+mod pmset;
+mod prime;
+mod state;
+mod statusline;
+mod window;
+
+use anyhow::{anyhow, Context, Result};
+use chrono::{Duration, Local};
+use clap::{Parser, Subcommand};
+use config::{Config, AGENT_LABEL, DAEMON_LABEL};
+
+#[derive(Parser)]
+#[command(
+    name = "claude-primer",
+    about = "Align Claude Code's 5-hour usage windows to your workday",
+    version
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Write and load the launchd units, and arm the wake events.
+    Install {
+        /// A token from `claude setup-token`. Prompted for if omitted.
+        #[arg(long)]
+        token: Option<String>,
+        /// Skip registering the Claude Code status line.
+        #[arg(long)]
+        no_statusline: bool,
+    },
+    /// Send one priming prompt. This is what the LaunchAgent invokes.
+    Run {
+        /// An anchor like 05:30, or `auto` to resolve it from the clock.
+        #[arg(long, default_value = "auto")]
+        anchor: String,
+        /// Compose the command and log it without spending anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Bypass the weekday and staleness guards.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show anchors, recent runs, unit health, and the current window.
+    Status,
+    /// One-line readout for Claude Code's status line. Local state only, zero tokens.
+    Statusline,
+    /// Model the window grid a set of anchors produces. Pure arithmetic, no API calls.
+    Simulate {
+        #[arg(long, default_value = "09:00-17:00")]
+        workday: String,
+        /// Override the configured anchors, e.g. --anchors 09:00,14:00
+        #[arg(long, value_delimiter = ',')]
+        anchors: Option<Vec<String>>,
+    },
+    /// Re-arm the rolling wake events. Run as root by the LaunchDaemon.
+    ArmWakes,
+    /// Unload the units and cancel our wake events. Config and logs are kept.
+    Uninstall,
+}
+
+fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<()> {
+    match Cli::parse().command {
+        Cmd::Install { token, no_statusline } => cmd_install(token, no_statusline),
+        Cmd::Run { anchor, dry_run, force } => {
+            let cfg = Config::load()?;
+            prime::run(&cfg, prime::PrimeArgs { anchor, dry_run, force })?;
+            Ok(())
+        }
+        Cmd::Status => cmd_status(),
+        Cmd::Statusline => cmd_statusline(),
+        Cmd::Simulate { workday, anchors } => cmd_simulate(&workday, anchors),
+        Cmd::ArmWakes => cmd_arm_wakes(),
+        Cmd::Uninstall => cmd_uninstall(),
+    }
+}
+
+fn cmd_install(token: Option<String>, no_statusline: bool) -> Result<()> {
+    let mut cfg = Config::load().unwrap_or_default();
+
+    if cfg.claude_bin.is_empty() || !std::path::Path::new(&cfg.claude_bin).exists() {
+        cfg.claude_bin = resolve_claude_bin()?;
+    }
+    println!("claude binary: {}", cfg.claude_bin);
+
+    let exe = std::env::current_exe()?.canonicalize()?.display().to_string();
+
+    let token = match token {
+        Some(t) => Some(t),
+        None => prompt_token()?,
+    };
+    if token.is_none() {
+        eprintln!(
+            "note: no token supplied — primes will fall back to the login keychain, \
+             which is not available when the screen is locked or after a cold boot."
+        );
+    }
+
+    cfg.save()?;
+    std::fs::create_dir_all(config::prime_cwd()?)?;
+
+    let agent = launchd::write_agent(&cfg, &exe, token.as_deref())?;
+    launchd::bootstrap_agent(&agent)?;
+    println!("LaunchAgent: {} (loaded)", agent.display());
+
+    install_daemon(&exe)?;
+
+    if !no_statusline {
+        register_statusline(&exe)?;
+    }
+
+    println!("\nRun `claude-primer status` to confirm. Nothing needs restarting after a reboot.");
+    Ok(())
+}
+
+fn install_daemon(exe: &str) -> Result<()> {
+    let xml = launchd::daemon_plist_xml(exe)?;
+    let tmp = std::env::temp_dir().join(format!("{DAEMON_LABEL}.plist"));
+    std::fs::write(&tmp, &xml)?;
+    let dest = launchd::daemon_plist_path();
+
+    println!("\nThe wake-arming daemon needs root (pmset requires it, and a LaunchAgent");
+    println!("cannot sudo unattended). You'll be asked for your password once.");
+
+    let script = format!(
+        "cp {tmp} {dest} && chown root:wheel {dest} && chmod 644 {dest} && \
+         launchctl bootout system/{label} 2>/dev/null; launchctl bootstrap system {dest}",
+        tmp = tmp.display(),
+        dest = dest.display(),
+        label = DAEMON_LABEL
+    );
+    let status = std::process::Command::new("/usr/bin/sudo")
+        .args(["/bin/sh", "-c", &script])
+        .status()
+        .context("could not run sudo")?;
+    let _ = std::fs::remove_file(&tmp);
+
+    if status.success() {
+        println!("LaunchDaemon: {} (loaded)", dest.display());
+    } else {
+        eprintln!(
+            "warning: the daemon did not install. Later anchors will only wake the Mac\n\
+             if it happens to be awake already. Re-run install, or arm manually with\n\
+             `sudo claude-primer arm-wakes`."
+        );
+    }
+    Ok(())
+}
+
+fn register_statusline(exe: &str) -> Result<()> {
+    let path = config::home()?.join(".claude/settings.json");
+    let mut settings: serde_json::Value = if path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&path)?)
+            .with_context(|| format!("{} is not valid JSON", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+
+    if settings.get("statusLine").is_some() {
+        println!("\nsettings.json already has a statusLine — leaving it alone.");
+        println!("To use this one instead, set command to: {exe} statusline");
+        return Ok(());
+    }
+
+    if !confirm(&format!("\nRegister the status line in {}?", path.display()))? {
+        return Ok(());
+    }
+
+    settings["statusLine"] = serde_json::json!({
+        "type": "command",
+        "command": format!("{exe} statusline"),
+        "refreshInterval": 30
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&settings)? + "\n")?;
+    println!("status line registered (local subprocess, zero tokens)");
+    Ok(())
+}
+
+fn cmd_arm_wakes() -> Result<()> {
+    let cfg = Config::load()?;
+    if !pmset::is_root() {
+        return Err(anyhow!("arm-wakes needs root — try `sudo claude-primer arm-wakes`"));
+    }
+    let ledger = pmset::arm(&cfg)?;
+    println!(
+        "armed {} one-time wake(s); repeating slot at {} on {}",
+        ledger.armed.len(),
+        ledger.repeat_time_local.as_deref().unwrap_or("-"),
+        ledger.repeat_weekdays.as_deref().unwrap_or("-")
+    );
+    Ok(())
+}
+
+fn cmd_status() -> Result<()> {
+    let cfg = Config::load()?;
+    let now = Local::now();
+
+    println!("claude-primer");
+    println!("  claude binary   {}", cfg.claude_bin);
+    println!("  model           {}", cfg.model);
+    println!("  on missed       {:?} (grace {}m)", cfg.on_missed, cfg.grace_minutes);
+
+    // Anchors in both zones: EDT is what you configured, system-local is what launchd
+    // and pmset actually fire on.
+    let sys_offset = now.offset().local_minus_utc() / 3600;
+    println!("\n  anchors (EDT declared → system-local UTC{sys_offset:+})");
+    let today = config::today_edt();
+    for a in cfg.anchors()? {
+        let local = a.local_on(today)?;
+        let next = window::next_fire(&cfg, &a, now)?;
+        println!(
+            "    {} EDT  →  {} local     next: {}",
+            a.label(),
+            local.format("%H:%M"),
+            next.format("%a %d %b %H:%M")
+        );
+    }
+    if sys_offset != -4 {
+        println!("    note: system zone differs from EDT; the conversion above is applied for you.");
+    }
+
+    match state::last_window_start()? {
+        Some(start) => {
+            let ends = start + window::window_len();
+            if ends > now {
+                println!(
+                    "\n  window          started {}, {} left (ends {})",
+                    start.format("%H:%M"),
+                    window::fmt_hm(ends - now),
+                    ends.format("%H:%M")
+                );
+            } else {
+                println!("\n  window          none open (last ended {})", ends.format("%a %H:%M"));
+            }
+        }
+        None => println!("\n  window          none recorded yet"),
+    }
+
+    println!("\n  launchd");
+    for (label, name) in [(AGENT_LABEL, "agent "), (DAEMON_LABEL, "daemon")] {
+        let s = launchd::unit_status(label);
+        let desc = if !s.loaded {
+            "NOT LOADED".to_string()
+        } else {
+            let pid = s.pid.map(|p| format!("pid {p}")).unwrap_or_else(|| "idle".into());
+            let exit = s.last_exit.map(|e| format!(", last exit {e}")).unwrap_or_default();
+            format!("loaded, {pid}{exit}")
+        };
+        println!("    {name}  {desc}");
+    }
+
+    let events = pmset::scheduled_events();
+    let mine = pmset::ours(&events);
+    println!("\n  pmset           {} of ours armed, {} system events intact", mine.len(), events.len() - mine.len());
+    for e in mine.iter().take(4) {
+        println!("    {e}");
+    }
+
+    let runs = state::read_runs()?;
+    println!("\n  recent runs");
+    if runs.is_empty() {
+        println!("    none yet");
+    }
+    for r in runs.iter().rev().take(6) {
+        let cost = r.cost_usd.map(|c| format!("  ${c:.6}")).unwrap_or_default();
+        let late = r.late_by_minutes.map(|m| format!("  ({m}m late)")).unwrap_or_default();
+        println!(
+            "    {}  {:<6}  {}{}{}",
+            r.ts.format("%a %d %b %H:%M"),
+            r.anchor,
+            r.outcome.label(),
+            late,
+            cost
+        );
+    }
+    Ok(())
+}
+
+fn cmd_statusline() -> Result<()> {
+    statusline::drain_stdin();
+    // Never fail visibly in the middle of someone's prompt.
+    let line = (|| -> Result<String> {
+        let cfg = Config::load()?;
+        Ok(statusline::render(&statusline::snapshot(&cfg, Local::now())?))
+    })()
+    .unwrap_or_else(|_| "⏱ claude-primer not configured".to_string());
+    println!("{line}");
+    Ok(())
+}
+
+fn cmd_simulate(workday: &str, anchors: Option<Vec<String>>) -> Result<()> {
+    let cfg = Config::load().unwrap_or_default();
+    let anchors = match anchors {
+        Some(list) => list.iter().map(|s| config::Anchor::parse(s)).collect::<Result<Vec<_>>>()?,
+        None => cfg.anchors()?,
+    };
+    let day = window::parse_workday(workday)?;
+    let sim = window::simulate(&anchors, day);
+
+    println!(
+        "anchors {}   workday {}–{}   (all times EDT)\n",
+        anchors.iter().map(|a| a.label()).collect::<Vec<_>>().join(", "),
+        day.0.format("%H:%M"),
+        day.1.format("%H:%M")
+    );
+
+    for (i, w) in sim.windows.iter().enumerate() {
+        let covered = match (w.covers_from, w.covers_to) {
+            (Some(f), Some(t)) => format!(
+                "covers {}–{} of your day ({})",
+                f.format("%H:%M"),
+                t.format("%H:%M"),
+                window::fmt_hm(Duration::minutes(w.covers_minutes))
+            ),
+            _ => "outside your workday".to_string(),
+        };
+        println!(
+            "  window {}  {} ──────── {}   {}",
+            i + 1,
+            w.start.format("%H:%M"),
+            w.end.format("%H:%M"),
+            covered
+        );
+    }
+
+    for wasted in &sim.wasted {
+        println!(
+            "\n  ⚠ {} fires while the previous window is still open (until {}).",
+            wasted.anchor.label(),
+            wasted.window_open_until.format("%H:%M")
+        );
+        println!("    It spends quota and opens nothing. Move it to {} or later.", wasted.window_open_until.format("%H:%M"));
+    }
+
+    println!(
+        "\n  {} window-allowance(s) touch your workday.",
+        sim.windows_touching_workday()
+    );
+    println!(
+        "  Coverage: {} of {} ({:.0}%)",
+        window::fmt_hm(Duration::minutes(sim.covered_minutes)),
+        window::fmt_hm(Duration::minutes(sim.workday_minutes)),
+        sim.coverage_pct()
+    );
+    println!("\n  Priming does not grant more quota — it decides where the boundaries land.");
+    println!("  More windows touching your day means more total allowance, bounded by your weekly cap.");
+    Ok(())
+}
+
+fn cmd_uninstall() -> Result<()> {
+    if launchd::bootout_agent()? {
+        println!("agent unloaded");
+    } else {
+        println!("agent was not loaded");
+    }
+    if let Ok(p) = launchd::agent_plist_path() {
+        let _ = std::fs::remove_file(p);
+    }
+
+    let dest = launchd::daemon_plist_path();
+    if dest.exists() {
+        println!("removing the root daemon (one sudo prompt)");
+        let script = format!(
+            "launchctl bootout system/{DAEMON_LABEL} 2>/dev/null; rm -f {}",
+            dest.display()
+        );
+        let _ = std::process::Command::new("/usr/bin/sudo").args(["/bin/sh", "-c", &script]).status();
+    }
+
+    if pmset::is_root() {
+        let n = pmset::disarm()?;
+        println!("cancelled {n} wake event(s)");
+    } else {
+        let script = format!("{} arm-wakes --help >/dev/null 2>&1", std::env::current_exe()?.display());
+        let _ = script;
+        println!("run `sudo claude-primer uninstall` to also cancel armed wake events");
+    }
+
+    println!("config and logs retained");
+    Ok(())
+}
+
+fn resolve_claude_bin() -> Result<String> {
+    // launchd gives jobs a minimal PATH, so this must end up absolute.
+    let candidates = [
+        config::home()?.join(".local/bin/claude"),
+        std::path::PathBuf::from("/opt/homebrew/bin/claude"),
+        std::path::PathBuf::from("/usr/local/bin/claude"),
+    ];
+    for c in candidates {
+        if c.exists() {
+            return Ok(c.display().to_string());
+        }
+    }
+    let out = std::process::Command::new("/usr/bin/which").arg("claude").output()?;
+    let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !found.is_empty() && std::path::Path::new(&found).exists() {
+        return Ok(found);
+    }
+    Err(anyhow!("could not find the `claude` binary — set claude_bin in config.toml"))
+}
+
+fn prompt_token() -> Result<Option<String>> {
+    use std::io::Write;
+    println!("\nA long-lived token from `claude setup-token` lets a prime run even when");
+    println!("the login keychain is locked. It is stored in the LaunchAgent plist at");
+    println!("mode 0600 and never leaves this machine. Leave blank to skip.");
+    print!("token: ");
+    std::io::stdout().flush()?;
+    let mut s = String::new();
+    std::io::stdin().read_line(&mut s)?;
+    let s = s.trim().to_string();
+    Ok((!s.is_empty()).then_some(s))
+}
+
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::Write;
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut s = String::new();
+    std::io::stdin().read_line(&mut s)?;
+    Ok(matches!(s.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
