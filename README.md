@@ -317,6 +317,28 @@ At 3 primes a day, 5 days a week, the scheduling overhead is roughly **3,600 inp
 
 ---
 
+## My Personal Config
+
+claude_bin = "/Users/matnvd/.local/bin/claude"
+anchors  = []
+weekdays = []
+model = "haiku"
+timezone = "local"
+notify_on = "failure"
+on_missed = "skip"
+grace_minutes = 20
+
+[schedules]
+Mon = ["05:30", "10:30", "15:30","20:30"]
+Tue = ["05:30", "10:30", "15:30","20:30"]
+Wed = ["05:30", "10:30", "15:30","20:30"]
+Thu = ["05:30", "10:30", "15:30","20:30"]
+Fri = ["05:30", "10:30", "15:30"] # friday nights off :)
+Sat = ["08:30", "13:30", "18:30"]
+Sun = ["08:30", "13:30", "18:30"]
+
+---
+
 ## Policy
 
 Anthropic states that advertised Pro/Max limits "assume ordinary, individual usage of Claude Code and the Agent SDK." A handful of tiny scheduled prompts per day, on your own account, to time your own windows, sits inside that. `claude setup-token` is documented for exactly this kind of scripted use. Keep the volume as designed and don't scale it up.
