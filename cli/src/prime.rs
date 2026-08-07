@@ -170,6 +170,16 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
     let cwd = config::prime_cwd()?;
     std::fs::create_dir_all(&cwd)?;
 
+    // Sample the window *before* running: the run appends to the same log this reads,
+    // so afterwards it can no longer tell whether a window was already in flight.
+    //
+    // A prime that lands inside an open window opens nothing — it only spends quota
+    // from the window already running. Anchors spaced exactly 5h apart make that easy
+    // to hit, since a few seconds of drift is enough.
+    let window_open_until = state::last_window_start()?
+        .map(|start| start + crate::window::window_len())
+        .filter(|end| *end > now);
+
     let started = std::time::Instant::now();
     let out = Command::new(&cfg.claude_bin)
         .args(build_args(cfg))
@@ -190,7 +200,16 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-    let mut rec = RunRecord::new(&args.anchor, if is_error { Outcome::Error } else { Outcome::Ok });
+    // A successful call is not the same as an opened window. Reporting `ok` here when
+    // nothing opened would reset every countdown in the tool to a full 5 hours.
+    let outcome = match (is_error, window_open_until) {
+        (true, _) => Outcome::Error,
+        (false, Some(_)) => Outcome::OkWindowAlreadyOpen,
+        (false, None) => Outcome::Ok,
+    };
+
+    let mut rec = RunRecord::new(&args.anchor, outcome);
+    rec.window_open_until = window_open_until;
     rec.duration_ms = Some(elapsed);
     rec.scheduled_for = scheduled.and_then(|a| cfg.today().ok().zip(cfg.mode().ok()).and_then(|(d, m)| a.local_on(d, m).ok()));
     if let Some(v) = &parsed {
@@ -216,12 +235,28 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
     }
 
     state::append_run(&rec)?;
-    println!(
-        "{} — ok in {}ms{}",
-        args.anchor,
-        elapsed,
-        rec.cost_usd.map(|c| format!(" (${c:.6})")).unwrap_or_default()
-    );
+    let cost = rec.cost_usd.map(|c| format!(" (${c:.6})")).unwrap_or_default();
+
+    if let Some(until) = window_open_until {
+        // Say plainly that nothing opened. This is the case where a cheerful "ok" was
+        // actively misleading — quota was spent and the schedule did not move.
+        println!(
+            "{} — no new window: one was already open until {} ({} remaining){}",
+            args.anchor,
+            until.format("%H:%M"),
+            crate::window::fmt_hm(until - now),
+            cost
+        );
+        println!("  the anchor is inside the previous window; move it later or check `simulate`");
+        notify(
+            cfg,
+            Outcome::OkWindowAlreadyOpen,
+            &format!("{} opened nothing — window already ran to {}", args.anchor, until.format("%H:%M")),
+        )?;
+        return Ok(Outcome::OkWindowAlreadyOpen);
+    }
+
+    println!("{} — ok in {}ms{}", args.anchor, elapsed, cost);
     notify(cfg, Outcome::Ok, &format!("{} primed", args.anchor))?;
     Ok(Outcome::Ok)
 }

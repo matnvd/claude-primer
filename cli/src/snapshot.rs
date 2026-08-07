@@ -53,6 +53,8 @@ pub struct Today {
     pub expected: usize,
     pub done: usize,
     pub had_stale_miss: bool,
+    /// A prime ran but opened nothing — quota spent, schedule unmoved.
+    pub had_wasted: bool,
     pub runs: Vec<RunSummary>,
 }
 
@@ -137,7 +139,7 @@ pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
     // miss, which only means one window was lost.
     let health = if !snap.agent_healthy {
         Health::Error
-    } else if snap.had_stale_miss || runs.iter().any(|r| r.outcome == Outcome::Error) {
+    } else if snap.had_stale_miss || snap.had_wasted || runs.iter().any(|r| r.outcome == Outcome::Error) {
         Health::Warn
     } else {
         Health::Ok
@@ -152,6 +154,7 @@ pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
             expected: snap.primes_expected,
             done: snap.primes_done,
             had_stale_miss: snap.had_stale_miss,
+            had_wasted: snap.had_wasted,
             runs,
         },
         upcoming,

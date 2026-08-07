@@ -20,6 +20,8 @@ pub struct Snapshot {
     pub primes_done: usize,
     pub primes_expected: usize,
     pub had_stale_miss: bool,
+    /// A prime ran but opened nothing, because a window was already in flight.
+    pub had_wasted: bool,
     pub agent_healthy: bool,
     pub scheduled_today: bool,
 }
@@ -34,8 +36,11 @@ pub fn snapshot(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
 
     let today = now.date_naive();
     let todays = state::runs_on_date(today)?;
+    // Counts windows opened, not calls that succeeded — a prime landing inside an open
+    // window returns fine but achieves nothing.
     let primes_done = todays.iter().filter(|r| r.outcome.opened_window()).count();
     let had_stale_miss = todays.iter().any(|r| r.outcome == Outcome::MissedTooStale);
+    let had_wasted = todays.iter().any(|r| r.outcome.wasted());
 
     // Today's own anchor count, which differs from the base set on a day with a
     // per-day schedule.
@@ -52,6 +57,7 @@ pub fn snapshot(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
         primes_done,
         primes_expected,
         had_stale_miss,
+        had_wasted,
         agent_healthy,
         scheduled_today,
     })
@@ -71,7 +77,7 @@ pub fn render(s: &Snapshot) -> String {
 
     let mark = if !s.agent_healthy {
         "✗"
-    } else if s.had_stale_miss {
+    } else if s.had_stale_miss || s.had_wasted {
         "⚠"
     } else if !s.scheduled_today {
         "—"
@@ -107,6 +113,7 @@ mod tests {
             primes_done: 3,
             primes_expected: 3,
             had_stale_miss: false,
+            had_wasted: false,
             agent_healthy: true,
             scheduled_today: true,
         }
