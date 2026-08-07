@@ -5,12 +5,13 @@
 //! Duplicating the 5-hour arithmetic over there would guarantee the two eventually
 //! disagree, and this side is the one with tests.
 //!
-//! Like [`crate::statusline`], this reads local files only: no network, no tokens, and
-//! never the `claude` binary.
+//! It reads local files only: no network, no tokens, and never the `claude` binary.
+//! The menu bar polls this every 30s, so reaching the prime path here would open a
+//! window on every refresh.
 
 use crate::config::{Config, AGENT_LABEL, DAEMON_LABEL};
 use crate::state::{self, Outcome};
-use crate::{launchd, statusline, window};
+use crate::{launchd, window};
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use serde::Serialize;
@@ -99,8 +100,51 @@ pub struct Paths {
     pub runs_log: String,
 }
 
+/// The raw state everything else is derived from. Separate from [`Snapshot`] because
+/// this is internal shape; `Snapshot` is the JSON contract the menu bar renders.
+pub struct Readout {
+    pub window_remaining: Option<chrono::Duration>,
+    pub primes_done: usize,
+    pub primes_expected: usize,
+    pub had_stale_miss: bool,
+    /// A prime ran but opened nothing, because a window was already in flight.
+    pub had_wasted: bool,
+    pub agent_healthy: bool,
+    pub scheduled_today: bool,
+}
+
+pub fn gather(cfg: &Config, now: DateTime<Local>) -> Result<Readout> {
+    let window_remaining = state::last_window_start()?.and_then(|start| {
+        let ends = start + window::window_len();
+        (ends > now).then(|| ends - now)
+    });
+
+    let todays = state::runs_on_date(now.date_naive())?;
+    // Counts windows opened, not calls that succeeded — a prime landing inside an open
+    // window returns fine but achieves nothing.
+    let primes_done = todays.iter().filter(|r| r.outcome.opened_window()).count();
+    let had_stale_miss = todays.iter().any(|r| r.outcome == Outcome::MissedTooStale);
+    let had_wasted = todays.iter().any(|r| r.outcome.wasted());
+
+    // Today's own anchor count, which differs from the base set on a day with a
+    // per-day schedule.
+    let todays_anchors = cfg.anchors_for(cfg.today()?)?;
+
+    let unit = launchd::unit_status(AGENT_LABEL);
+
+    Ok(Readout {
+        window_remaining,
+        primes_done,
+        primes_expected: todays_anchors.len(),
+        had_stale_miss,
+        had_wasted,
+        agent_healthy: unit.loaded && unit.last_exit.map(|e| e == 0).unwrap_or(true),
+        scheduled_today: !todays_anchors.is_empty(),
+    })
+}
+
 pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
-    let snap = statusline::snapshot(cfg, now)?;
+    let snap = gather(cfg, now)?;
     let started_at = state::last_window_start()?;
 
     // `window_remaining` is derived from `last_window_start`, so remaining-without-a-
@@ -135,15 +179,7 @@ pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
     let agent = unit_state(AGENT_LABEL);
     let daemon = unit_state(DAEMON_LABEL);
 
-    // An agent that isn't loaded means nothing fires at all, so it outranks a stale
-    // miss, which only means one window was lost.
-    let health = if !snap.agent_healthy {
-        Health::Error
-    } else if snap.had_stale_miss || snap.had_wasted || runs.iter().any(|r| r.outcome == Outcome::Error) {
-        Health::Warn
-    } else {
-        Health::Ok
-    };
+    let health = health_of(&snap, &runs);
 
     Ok(Snapshot {
         generated_at: now,
@@ -167,6 +203,23 @@ pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
     })
 }
 
+/// Severity, resolved once so no surface can disagree with another.
+///
+/// An agent that isn't loaded means *nothing* fires, so it outranks a stale miss or a
+/// wasted prime, each of which costs only a single window.
+fn health_of(snap: &Readout, runs: &[RunSummary]) -> Health {
+    if !snap.agent_healthy {
+        Health::Error
+    } else if snap.had_stale_miss
+        || snap.had_wasted
+        || runs.iter().any(|r| r.outcome == Outcome::Error)
+    {
+        Health::Warn
+    } else {
+        Health::Ok
+    }
+}
+
 fn unit_state(label: &str) -> UnitState {
     let u = launchd::unit_status(label);
     UnitState { loaded: u.loaded, last_exit: u.last_exit }
@@ -175,6 +228,51 @@ fn unit_state(label: &str) -> UnitState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn readout(agent_healthy: bool, stale: bool, wasted: bool) -> Readout {
+        Readout {
+            window_remaining: None,
+            primes_done: 3,
+            primes_expected: 3,
+            had_stale_miss: stale,
+            had_wasted: wasted,
+            agent_healthy,
+            scheduled_today: true,
+        }
+    }
+
+    fn run_with(outcome: Outcome) -> RunSummary {
+        RunSummary {
+            ts: Local::now(),
+            anchor: "10:30".into(),
+            outcome,
+            label: outcome.label().to_string(),
+            cost_usd: None,
+        }
+    }
+
+    #[test]
+    fn a_clean_day_is_ok() {
+        assert_eq!(health_of(&readout(true, false, false), &[]), Health::Ok);
+    }
+
+    #[test]
+    fn a_stale_miss_or_a_wasted_prime_warns() {
+        assert_eq!(health_of(&readout(true, true, false), &[]), Health::Warn);
+        assert_eq!(health_of(&readout(true, false, true), &[]), Health::Warn);
+    }
+
+    #[test]
+    fn a_failed_prime_warns() {
+        assert_eq!(health_of(&readout(true, false, false), &[run_with(Outcome::Error)]), Health::Warn);
+    }
+
+    #[test]
+    fn an_unloaded_agent_outranks_everything_else() {
+        // Nothing fires at all, so it must not be softened to a warning by a day that
+        // also happens to have a stale miss.
+        assert_eq!(health_of(&readout(false, true, true), &[run_with(Outcome::Error)]), Health::Error);
+    }
 
     #[test]
     fn health_is_serialized_lowercase() {

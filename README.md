@@ -48,7 +48,6 @@ Other targets: `make cli`, `make menubar`, `make test`, `make uninstall`, `make 
 2. Ask for a token from `claude setup-token` — a one-year OAuth token. It's stored in the LaunchAgent plist at mode `0600` and never leaves your machine. This is what lets a 05:30 prime work with the screen locked, since it bypasses the keychain.
 3. Write and bootstrap `~/Library/LaunchAgents/com.claude-primer.agent.plist`.
 4. With one `sudo` prompt, write and bootstrap `/Library/LaunchDaemons/com.claude-primer.wake.plist`, which arms the wake events.
-5. Optionally register the status line in `~/.claude/settings.json` (asks first).
 
 Install once. **Nothing needs restarting after a reboot** — launchd reloads both units automatically at login/boot, and `pmset` events persist in system power-management preferences.
 
@@ -67,7 +66,7 @@ Short version: it sends a two-word prompt on a timer, and everything it touches 
 - **It only ever sends one trivial message.** The whole conversation is `-p "ok"`, answered under a replaced system prompt of `"Reply with exactly: OK"` — the replacement is there to drop Claude Code's real system prompt, which is most of the token cost. It cannot read your files, run commands, or edit anything: `--tools ""` removes every tool from the model's context, so there is nothing for it to act with.
 - **It runs in an empty directory.** No project `CLAUDE.md`, hooks, or `.mcp.json` are loaded, and its transcripts stay out of your real projects' `--resume` history.
 - **Your token stays on this machine.** Stored in a `0600` LaunchAgent plist, read only by the prime. Nothing is uploaded anywhere.
-- **It never touches other apps' settings.** The one shared file it edits is `~/.claude/settings.json`, to register the status line, and it asks first. `pmset` events are cancelled by exact match so your calendar alarms survive.
+- **It never touches other apps' settings.** It writes only its own launchd plists and its own files under `~/.config` and `~/.local/share`. `pmset` events are cancelled by exact match, so your calendar alarms survive.
 - **It cannot spend money.** On a subscription a prime draws from your usage quota; the dollar figures in the logs are what the request *would* cost at API rates, not a bill.
 - **The menu bar app is read-only.** It renders `claude-primer snapshot` and nothing else. Deleting it does not affect whether primes fire.
 - **`claude-primer uninstall` removes all of it.** Both launchd jobs and its own wake events. `make uninstall` also removes the app.
@@ -146,32 +145,6 @@ Anchors that fall while the Mac is fully shut down are simply missed. With FileV
 
 ---
 
-## Status line
-
-Register `claude-primer` as Claude Code's status line for an always-visible readout:
-
-```jsonc
-// ~/.claude/settings.json
-"statusLine": {
-  "type": "command",
-  "command": "claude-primer statusline",
-  "refreshInterval": 30
-}
-```
-
-```
-~/GitHub/bios-db  main*
-⏱ 2h14m left in window · next prime 15:30 · ✓ 3/3 today
-```
-
-`✓` all primes landed · `⚠` a prime was skipped as stale · `✗` agent not loaded or last exit non-zero · `—` outside the workday envelope.
-
-**This costs zero tokens.** Claude Code runs the status line as a *local subprocess* — it pipes session JSON to stdin and renders stdout. No model is invoked and no network call happens. `claude-primer statusline` only reads local state and does date arithmetic.
-
-> By design, `statusline` never invokes `claude`. Reading window state by shelling out to `/usage` would cost tokens *and*, far worse, **start a new 5-hour window every 30 seconds** — destroying the exact thing this tool exists to control.
-
----
-
 ## Menu bar app
 
 Optional. A small Swift app showing the Claude mark in the menu bar, with the schedule behind it.
@@ -216,7 +189,7 @@ It holds no window arithmetic either. All state comes from `claude-primer snapsh
 claude-primer snapshot | jq .
 ```
 
-Severity (`health`) is computed in Rust, so the menu bar and `status` can't disagree about what counts as a problem. Like the status line, it reads local files only — zero tokens, zero network, and it never invokes `claude`.
+Severity (`health`) is computed in Rust, so the menu bar and `status` can't disagree about what counts as a problem. It reads local files only — zero tokens, zero network, and it never invokes `claude`.
 
 ### Building it
 
@@ -266,7 +239,7 @@ After editing, **re-run `claude-primer install`** to regenerate the launchd unit
 > every single day.
 >
 > When that happens, `runs.jsonl` records `wasted: window already open` with the time it
-> collided with, and the status line shows `⚠`.
+> collided with, and the menu bar shows `⚠`.
 
 ### Waiting out a closing window
 

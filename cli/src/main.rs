@@ -4,7 +4,6 @@ mod pmset;
 mod prime;
 mod snapshot;
 mod state;
-mod statusline;
 mod window;
 
 use anyhow::{anyhow, Context, Result};
@@ -30,9 +29,6 @@ enum Cmd {
         /// A token from `claude setup-token`. Prompted for if omitted.
         #[arg(long)]
         token: Option<String>,
-        /// Skip registering the Claude Code status line.
-        #[arg(long)]
-        no_statusline: bool,
     },
     /// Send one priming prompt. This is what the LaunchAgent invokes.
     Run {
@@ -50,8 +46,6 @@ enum Cmd {
     Status,
     /// Print the path to the config file, for `code $(claude-primer config-path)`.
     ConfigPath,
-    /// One-line readout for Claude Code's status line. Local state only, zero tokens.
-    Statusline,
     /// Print full state as JSON. The contract the menu bar app renders.
     Snapshot,
     /// Manage the menu bar app's launch-at-login agent.
@@ -102,7 +96,7 @@ extern "C" {
 
 fn real_main() -> Result<()> {
     match Cli::parse().command {
-        Cmd::Install { token, no_statusline } => cmd_install(token, no_statusline),
+        Cmd::Install { token } => cmd_install(token),
         Cmd::Run { anchor, dry_run, force } => {
             let cfg = Config::load()?;
             prime::run(&cfg, prime::PrimeArgs { anchor, dry_run, force })?;
@@ -113,7 +107,6 @@ fn real_main() -> Result<()> {
             println!("{}", Config::path()?.display());
             Ok(())
         }
-        Cmd::Statusline => cmd_statusline(),
         Cmd::Snapshot => cmd_snapshot(),
         Cmd::Menubar { action } => cmd_menubar(action),
         Cmd::ArmWakes => cmd_arm_wakes(),
@@ -121,7 +114,7 @@ fn real_main() -> Result<()> {
     }
 }
 
-fn cmd_install(token: Option<String>, no_statusline: bool) -> Result<()> {
+fn cmd_install(token: Option<String>) -> Result<()> {
     // Create a commented starter config only if none exists. An existing config is
     // read and never rewritten, so hand-added comments survive reinstalls.
     if Config::write_default_if_absent(&resolve_claude_bin()?)? {
@@ -184,10 +177,6 @@ fn cmd_install(token: Option<String>, no_statusline: bool) -> Result<()> {
 
     install_daemon(&exe)?;
 
-    if !no_statusline {
-        register_statusline(&exe)?;
-    }
-
     println!("\nRun `claude-primer status` to confirm. Nothing needs restarting after a reboot.");
     Ok(())
 }
@@ -223,35 +212,6 @@ fn install_daemon(exe: &str) -> Result<()> {
              `sudo claude-primer arm-wakes`."
         );
     }
-    Ok(())
-}
-
-fn register_statusline(exe: &str) -> Result<()> {
-    let path = config::home()?.join(".claude/settings.json");
-    let mut settings: serde_json::Value = if path.exists() {
-        serde_json::from_str(&std::fs::read_to_string(&path)?)
-            .with_context(|| format!("{} is not valid JSON", path.display()))?
-    } else {
-        serde_json::json!({})
-    };
-
-    if settings.get("statusLine").is_some() {
-        println!("\nsettings.json already has a statusLine — leaving it alone.");
-        println!("To use this one instead, set command to: {exe} statusline");
-        return Ok(());
-    }
-
-    if !confirm(&format!("\nRegister the status line in {}?", path.display()))? {
-        return Ok(());
-    }
-
-    settings["statusLine"] = serde_json::json!({
-        "type": "command",
-        "command": format!("{exe} statusline"),
-        "refreshInterval": 30
-    });
-    std::fs::write(&path, serde_json::to_string_pretty(&settings)? + "\n")?;
-    println!("status line registered (local subprocess, zero tokens)");
     Ok(())
 }
 
@@ -449,18 +409,6 @@ fn cmd_menubar(action: MenubarAction) -> Result<()> {
     Ok(())
 }
 
-fn cmd_statusline() -> Result<()> {
-    statusline::drain_stdin();
-    // Never fail visibly in the middle of someone's prompt.
-    let line = (|| -> Result<String> {
-        let cfg = Config::load()?;
-        Ok(statusline::render(&statusline::snapshot(&cfg, Local::now())?))
-    })()
-    .unwrap_or_else(|_| "⏱ claude-primer not configured".to_string());
-    println!("{line}");
-    Ok(())
-}
-
 fn cmd_uninstall() -> Result<()> {
     if launchd::bootout_agent()? {
         println!("agent unloaded");
@@ -527,11 +475,4 @@ fn prompt_token() -> Result<Option<String>> {
     Ok((!s.is_empty()).then_some(s))
 }
 
-fn confirm(question: &str) -> Result<bool> {
-    use std::io::Write;
-    print!("{question} [y/N] ");
-    std::io::stdout().flush()?;
-    let mut s = String::new();
-    std::io::stdin().read_line(&mut s)?;
-    Ok(matches!(s.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
-}
+
