@@ -237,15 +237,21 @@ on_missed     = "skip"                           # "skip" | "shift"
 grace_minutes = 20
 ```
 
-After editing, **re-run `claude-primer install`** to regenerate the launchd units — anchor times are baked into the plist as `StartCalendarInterval` entries. `simulate` and `status` reflect an edit immediately, but the live schedule won't until you reinstall.
+After editing, **re-run `claude-primer install`** to regenerate the launchd units — anchor times are baked into the plist as `StartCalendarInterval` entries. `status` reflects an edit immediately, but the live schedule won't until you reinstall.
 
-Check a new anchor set before committing to it. This costs nothing:
-
-```sh
-claude-primer simulate --workday 09:00-17:00 --anchors 06:00,11:00,16:00
-```
-
-It will warn if an anchor lands inside a still-open window, which spends quota and opens nothing.
+> **Space your anchors more than 5 hours apart.**
+>
+> A prime opens a window that runs for exactly 5 hours. Any anchor that falls inside a
+> still-open window spends quota and opens nothing — the window doesn't extend, and no new
+> one starts until you next send a message.
+>
+> Gaps of exactly `5h00m` are the trap: a prime takes 2–11 seconds and launchd can fire a
+> moment early, so the next anchor lands just inside the previous window. Leave a few minutes
+> of slack (`05:30, 10:35, 15:40`). **Watch the wrap past midnight too** — a `20:30` anchor
+> runs to `01:30`, so a `00:30` anchor the next morning is wasted every single day.
+>
+> When it happens, `runs.jsonl` records `wasted: window already open` with the time it
+> collided with, and the status line shows `⚠`.
 
 ### Setting times per day
 

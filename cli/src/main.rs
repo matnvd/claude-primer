@@ -8,7 +8,7 @@ mod statusline;
 mod window;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{Duration, Local};
+use chrono::Local;
 use clap::{Parser, Subcommand};
 use config::{Config, AGENT_LABEL, DAEMON_LABEL};
 
@@ -58,14 +58,6 @@ enum Cmd {
     Menubar {
         #[command(subcommand)]
         action: MenubarAction,
-    },
-    /// Model the window grid a set of anchors produces. Pure arithmetic, no API calls.
-    Simulate {
-        #[arg(long, default_value = "09:00-17:00")]
-        workday: String,
-        /// Override the configured anchors, e.g. --anchors 09:00,14:00
-        #[arg(long, value_delimiter = ',')]
-        anchors: Option<Vec<String>>,
     },
     /// Re-arm the rolling wake events. Run as root by the LaunchDaemon.
     ArmWakes,
@@ -124,7 +116,6 @@ fn real_main() -> Result<()> {
         Cmd::Statusline => cmd_statusline(),
         Cmd::Snapshot => cmd_snapshot(),
         Cmd::Menubar { action } => cmd_menubar(action),
-        Cmd::Simulate { workday, anchors } => cmd_simulate(&workday, anchors),
         Cmd::ArmWakes => cmd_arm_wakes(),
         Cmd::Uninstall => cmd_uninstall(),
     }
@@ -459,66 +450,6 @@ fn cmd_statusline() -> Result<()> {
     })()
     .unwrap_or_else(|_| "⏱ claude-primer not configured".to_string());
     println!("{line}");
-    Ok(())
-}
-
-fn cmd_simulate(workday: &str, anchors: Option<Vec<String>>) -> Result<()> {
-    let cfg = Config::load().unwrap_or_default();
-    let anchors = match anchors {
-        Some(list) => list.iter().map(|s| config::Anchor::parse(s)).collect::<Result<Vec<_>>>()?,
-        None => cfg.anchors()?,
-    };
-    let day = window::parse_workday(workday)?;
-    let sim = window::simulate(&anchors, day);
-
-    println!(
-        "anchors {}   workday {}–{}   (all times local)\n",
-        anchors.iter().map(|a| a.label()).collect::<Vec<_>>().join(", "),
-        day.0.format("%H:%M"),
-        day.1.format("%H:%M")
-    );
-
-    for (i, w) in sim.windows.iter().enumerate() {
-        let covered = match (w.covers_from, w.covers_to) {
-            (Some(f), Some(t)) => format!(
-                "covers {}–{} of your day ({})",
-                f.format("%H:%M"),
-                t.format("%H:%M"),
-                window::fmt_hm(Duration::minutes(w.covers_minutes))
-            ),
-            _ => "outside your workday".to_string(),
-        };
-        println!(
-            "  window {} (from {})  {} ──────── {}   {}",
-            i + 1,
-            w.opened_by.label(),
-            w.start.format("%H:%M"),
-            w.end.format("%H:%M"),
-            covered
-        );
-    }
-
-    for wasted in &sim.wasted {
-        println!(
-            "\n  ⚠ {} fires while the previous window is still open (until {}).",
-            wasted.anchor.label(),
-            wasted.window_open_until.format("%H:%M")
-        );
-        println!("    It spends quota and opens nothing. Move it to {} or later.", wasted.window_open_until.format("%H:%M"));
-    }
-
-    println!(
-        "\n  {} window-allowance(s) touch your workday.",
-        sim.windows_touching_workday()
-    );
-    println!(
-        "  Coverage: {} of {} ({:.0}%)",
-        window::fmt_hm(Duration::minutes(sim.covered_minutes)),
-        window::fmt_hm(Duration::minutes(sim.workday_minutes)),
-        sim.coverage_pct()
-    );
-    println!("\n  Priming does not grant more quota — it decides where the boundaries land.");
-    println!("  More windows touching your day means more total allowance, bounded by your weekly cap.");
     Ok(())
 }
 

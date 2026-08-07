@@ -247,7 +247,7 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
             crate::window::fmt_hm(until - now),
             cost
         );
-        println!("  the anchor is inside the previous window; move it later or check `simulate`");
+        println!("  this anchor sits inside the previous window — space it further apart");
         notify(
             cfg,
             Outcome::OkWindowAlreadyOpen,

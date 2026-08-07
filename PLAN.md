@@ -8,7 +8,7 @@ The fix is to *choose* where the boundaries land by sending one trivial prompt a
 
 `claude-primer` is a Rust CLI that installs the launchd units and `pmset` wake events to make those primes fire on schedule, unattended, including while the Mac is asleep.
 
-**Set expectations honestly:** priming does not grant more quota. It controls *when* windows start. The secondary effect — that an early anchor can expose your workday to three window-allowances instead of two — is real but is bounded by the weekly cap, which on **Pro** is the tighter constraint. The `simulate` subcommand exists so anchors get chosen from arithmetic rather than guesswork.
+**Set expectations honestly:** priming does not grant more quota. It controls *when* windows start. The secondary effect — that an early anchor can expose your workday to three window-allowances instead of two — is real but is bounded by the weekly cap, which on **Pro** is the tighter constraint.
 
 **Scope boundary:** Mac-only.
 
@@ -138,14 +138,14 @@ States: `✓` all primes landed · `⚠` a prime was skipped as stale · `✗` a
 claude-primer/
   Cargo.toml
   src/
-    main.rs        clap CLI: install | run | status | simulate | arm-wakes | uninstall
+    main.rs        clap CLI: install | run | status | snapshot | menubar | arm-wakes | uninstall
     config.rs      TOML config + serde types
     state.rs       run log (JSONL) + armed-wake ledger
     prime.rs       builds & spawns the claude invocation, parses JSON result
     statusline.rs  one-line readout from local state; never touches the network
     launchd.rs     LaunchAgent + LaunchDaemon plist generation via the `plist` crate
     pmset.rs       schedule / repeat / precise cancel wrappers
-    window.rs      5-hour window arithmetic; powers `simulate` and `status`
+    window.rs      5-hour window arithmetic; powers `status` and the readouts
 ```
 
 Crates: `clap` (derive), `serde` + `serde_json` + `toml`, `chrono` + `chrono-tz`, `plist`, `anyhow`.
@@ -198,15 +198,13 @@ Use `launchctl bootstrap` / `bootout`, not the deprecated `load` / `unload`.
 
 **`statusline`** — prints the single-line readout and exits. Registered in `~/.claude/settings.json` by `install` (with confirmation, since it edits a file the tool doesn't own). Must remain fast and offline: no `claude` invocation, no network.
 
-**`simulate --workday 09:00-17:00`** — pure arithmetic, no API calls. Renders the window grid a given anchor set produces and reports how many window-allowances the workday touches, so anchors can be tuned deliberately. This is the piece that makes the tool an optimizer rather than a cron wrapper.
-
 **`uninstall`** — `bootout` both units, cancel our armed wake events precisely, retain config and logs.
 
 ---
 
 ## Verification
 
-1. `cargo build --release`, then `claude-primer simulate --workday 09:00-17:00` — validates the window math with zero quota spent.
+1. `cargo build --release && cargo test --release` — validates the window math with zero quota spent.
 2. `claude-primer run --anchor test --dry-run` — confirm the composed command line, especially the absolute `claude` path and the neutralizing flags.
 3. `claude-primer run --anchor test` for real — expect a fast `OK` and a `total_cost_usd` in `runs.jsonl` that is a small fraction of an unoptimized `-p` call. Then confirm in an interactive session that `/usage` shows a window that started just now.
 4. `claude-primer install`, then set a throwaway anchor 3 minutes out, close the lid, and confirm the Mac wakes and the run lands in `runs.jsonl` on time. **This is the test that matters** — it exercises pmset wake, launchd firing, the minimal `PATH`, and token auth with a locked screen all at once.
