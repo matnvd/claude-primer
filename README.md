@@ -9,21 +9,21 @@ menubar/    an optional menu bar app (Swift)
 
 ## The problem
 
-Claude Code's usage allowance runs on a **rolling 5-hour session window that starts on your first message** and expires exactly 5 hours later. It's anchored to you, not to the clock.
+Claude Code's usage allowance runs on a **rolling 5-hour session window that starts on your first message** and expires exactly 5 hours later. It's anchored to the user, not the clock.
 
-Left alone, that boundary lands wherever your first prompt of the day happened to fall. Send a throwaway message at 07:12 checking something, and your window now ends at 12:12 — so you hit "limit reached, resets in 3 hours" at 12:12, mid-task, and the next window ends at some equally arbitrary time. The boundary walks around your day.
+By default, that boundary lands whenver your first prompt of the day happens to fall. E.g. you start working at 9am and use up all your credits 2 hours in, but you still have 3 hours until your window ends at 2pm, limiting your work throughput.
 
 ## The fix
 
-Choose where the boundaries land, by sending one trivial prompt at each intended window start:
+Choose where the boundaries land to optimize around your workday, by sending one trivial prompt at each intended window start:
 
 ```
-prime 05:30  →  window 05:30 ────────── 10:30
+prime 05:30  →  window 05:30 ────────── 10:30     # e.g. start working at 9am, window resets in 1.5 hours
 prime 10:30  →  window 10:30 ────────── 15:30
 prime 15:30  →  window 15:30 ────────── 20:30
 ```
 
-Three near-free prompts lay a predictable grid over the workday, and each new window is a fresh allowance. `claude-primer` installs the launchd units and `pmset` wake events that make those primes fire on schedule, unattended, including while the Mac is asleep.
+Up to 5 near-free prompts laid out predictably over the workday, timed to maximize the number of daily usage limit windows to work around your sleep and eating schedules. `claude-primer` installs the launchd units and `pmset` wake events that make those primes fire on schedule, unattended, including while the Mac is asleep.
 
 
 ## Install
@@ -71,7 +71,7 @@ Short version: it sends a two-word prompt on a timer, and everything it touches 
 - **The menu bar app is read-only.** It renders `claude-primer snapshot` and nothing else. Deleting it does not affect whether primes fire.
 - **`claude-primer uninstall` removes all of it.** Both launchd jobs and its own wake events. `make uninstall` also removes the app.
 
-The honest risks are all about *scheduling*, not safety: a prime landing at a time that opens nothing, or an anchor missed because the Mac was off. Neither can damage anything outside this tool's own state.
+The only risks surround *scheduling*, not safety: a prime landing at a time that opens nothing, or an anchor missed because the Mac was off. Neither can damage anything outside this tool's own context.
 
 ---
 
@@ -94,7 +94,7 @@ One line per invocation. Statuses you'll see:
 | Status | Meaning |
 |---|---|
 | `ok` | prime landed and **opened a new window** |
-| `wasted: window already open` | the call succeeded but opened nothing — window was already running and doesn't reset the window properly, might want to add buffer time between anchors |
+| `wasted: window already open` | the call succeeded but opened nothing — window was already running and doesn't reset the window properly, might want to re-optimize your schedule |
 | `missed: too stale` | anchor passed while the Mac was off; skipped deliberately (see below) |
 | `error` | the `claude` call failed — check `stderr` in the same record |
 
@@ -226,21 +226,6 @@ boundary_wait_secs = 300                         # wait out a closing window; 0 
 
 After editing, **re-run `claude-primer install`** to regenerate the launchd units — anchor times are baked into the plist as `StartCalendarInterval` entries. `status` reflects an edit immediately, but the live schedule won't until you reinstall.
 
-> **Space your anchors more than 5 hours apart.**
->
-> A prime opens a window that runs for exactly 5 hours. Any anchor that falls inside a
-> still-open window opens nothing — the window doesn't extend, and no new one starts until
-> you next send a message.
->
-> Small drift is handled for you: if the open window is about to close, the prime **waits
-> for it** rather than wasting itself (see below). What it can't rescue is an anchor placed
-> deep inside another window. **Watch the wrap past midnight especially** — a `20:30` anchor
-> runs to `01:30`, so a `00:30` anchor the next morning is an hour inside it and is wasted
-> every single day.
->
-> When that happens, `runs.jsonl` records `wasted: window already open` with the time it
-> collided with, and the menu bar shows `⚠`.
-
 ### Waiting out a closing window
 
 Anchors spaced near 5 hours apart are fragile on their own: a prime takes 2–11 seconds and
@@ -301,20 +286,21 @@ Sun = ["11:00"]
 anchors  = []
 weekdays = []
 
+# ex. my personal config
 [schedules]
-Mon = ["05:30", "10:30", "15:30"]
-Tue = ["06:00", "11:00", "16:00"]
-Wed = ["05:30", "10:30", "15:30"]
-Thu = ["07:00", "12:00"]
-Fri = ["05:30", "10:30"]
-Sat = ["09:00", "14:00"]
-Sun = ["11:00"]
+Mon = ["0:30", "05:30", "10:30", "15:30", "20:30"]
+Tue = ["05:30", "10:30", "15:30", "20:30"]
+Wed = ["05:30", "10:30", "15:30", "20:30"]
+Thu = ["05:30", "10:30", "15:30", "20:30"]
+Fri = ["05:30", "10:30", "15:30"]
+Sat = ["08:30", "13:30", "18:30"]
+Sun = ["09:30", "14:30", "19:30"]
 ```
 
 `status` renders whichever you use as a full week:
 
 ```
-  schedule (EDT declared → system-local UTC-3)
+  schedule
     Mon  05:30 → 06:30   10:30 → 11:30   15:30 → 16:30   (per-day override)
     Thu  07:00 → 08:00   12:00 → 13:00                   (per-day override)
     Sun  11:00 → 12:00                                   (per-day override)
@@ -329,13 +315,7 @@ Notes:
 
 One consequence worth knowing: `pmset` allows only **one** repeating wake event, and it goes to the earliest anchor of the `anchors`/`weekdays` shorthand. Anchors from `[schedules]` are covered by rolling one-time wake events instead, re-armed daily by the root daemon. Without that daemon, those primes only fire when the Mac is already awake.
 
-### Timezone
-
-`timezone = "local"` (the default) reads every time as **this Mac's own clock**. `05:30` in the config means 05:30 on the menu-bar clock, no conversion, and **macOS handles daylight saving** — so the times don't drift across a DST transition.
-
-A fixed offset is also accepted if you'd rather pin times to an absolute zone: `EDT`, `EST`, `UTC`, or an explicit `UTC-4` / `UTC+5:30`. These do **not** shift with DST, so a time declared in summer fires an hour off once the local zone leaves daylight saving. `status` labels the mode and, for a fixed offset, shows both the declared time and the local time it actually fires at.
-
-This distinction exists because `StartCalendarInterval` has no timezone field — launchd always fires in the *system* zone, so anything that isn't already system-local has to be converted before it reaches the plist.
+`timezone = "local"` (the default) reads every time as **this Mac's own clock**. A fixed offset is also accepted if you'd rather pin times to an absolute zone: `EDT`, `EST`, `UTC`, or an explicit `UTC-4` / `UTC+5:30`. These do **not** shift with DST.
 
 ---
 
@@ -350,13 +330,7 @@ claude -p "ok" --model haiku --system-prompt "Reply with exactly: OK" --tools ""
   --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 ```
 
-### What "cost" means here
-
-On a Pro or Max subscription **a prime does not cost you money.** The `total_cost_usd` that Claude Code reports — and that `claude-primer` logs — is what the request *would* cost at standard API rates. It's a usage meter, not a bill.
-
-What a prime actually spends is **quota**: your 5-hour session allowance and your weekly caps. Dollars only enter the picture if you have separately enabled extra usage / usage credits *and* have gone past your included limits, at which point Claude continues at consumption-based pricing instead of blocking.
-
-So read the dollar figures below as a proxy for size. **The input-token column is the one that matters**, because tokens are what your weekly cap is denominated in.
+Prime only spends your quote, so read the dollar figures below as a proxy for size along with the input tokens (which is what matters).
 
 ### Measured
 
@@ -375,27 +349,3 @@ Two findings drove that gap:
 The rest: `--system-prompt` replaces the default system prompt (measured: the prompt itself drops to ~10 tokens), `--strict-mcp-config` with an empty config stops your global MCP servers loading, `--settings` overrides a global `effortLevel`, `--model haiku` keeps the call off the Sonnet-specific weekly cap, and cwd is pinned to an empty directory so no project `CLAUDE.md`, hooks, or `.mcp.json` are discovered.
 
 `--bare` would be the obvious choice here and is deliberately **not** used: bare mode never reads OAuth credentials or `CLAUDE_CODE_OAUTH_TOKEN`, so it would bill the API instead of touching your subscription window — the opposite of the goal.
-
-At 3 primes a day, 5 days a week, the scheduling overhead is roughly **3,600 input tokens per week** against your caps — and no money on a subscription.
-
----
-
-## My Personal Config
-
-claude_bin = "/Users/matnvd/.local/bin/claude"
-anchors  = []
-weekdays = []
-model = "haiku"
-timezone = "local"
-notify_on = "failure"
-on_missed = "skip"
-grace_minutes = 20
-
-[schedules]
-Mon = ["05:30", "10:30", "15:30","20:30"]
-Tue = ["05:30", "10:30", "15:30","20:30"]
-Wed = ["05:30", "10:30", "15:30","20:30"]
-Thu = ["05:30", "10:30", "15:30","20:30"]
-Fri = ["05:30", "10:30", "15:30"] # friday nights off :)
-Sat = ["08:30", "13:30", "18:30"]
-Sun = ["08:30", "13:30", "18:30"]
