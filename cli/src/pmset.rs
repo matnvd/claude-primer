@@ -23,6 +23,25 @@ pub fn fmt_pmset_datetime(dt: &DateTime<Local>) -> String {
 /// single slot goes to the earliest anchor, which is the one that genuinely needs it
 /// (the Mac is asleep overnight). Later anchors use one-time `schedule` events, which
 /// may exist in quantity but must be re-armed — hence the daily daemon.
+/// Which anchor gets the single `pmset repeat` slot, and on which days.
+///
+/// `man pmset`: "you may only have one pair of repeating events scheduled". So it goes
+/// to whichever first-anchor-of-the-day covers the most days — the overnight wake that
+/// matters most, since that is when the Mac is actually asleep. Every other anchor is
+/// covered by rolling one-time events. Ties break toward the earlier time.
+fn repeat_slot(cfg: &Config) -> Result<Option<(config::Anchor, Vec<chrono::Weekday>)>> {
+    let mut by_time: std::collections::BTreeMap<config::Anchor, Vec<chrono::Weekday>> =
+        std::collections::BTreeMap::new();
+    for (weekday, anchors) in cfg.active_days()? {
+        if let Some(first) = anchors.first() {
+            by_time.entry(*first).or_default().push(weekday);
+        }
+    }
+    Ok(by_time
+        .into_iter()
+        .max_by_key(|(anchor, days)| (days.len(), std::cmp::Reverse(*anchor))))
+}
+
 pub fn arm(cfg: &Config) -> Result<WakeLedger> {
     let mut ledger = WakeLedger::load()?;
 
@@ -32,18 +51,18 @@ pub fn arm(cfg: &Config) -> Result<WakeLedger> {
         let _ = cancel_one(&w.datetime);
     }
 
-    // The single repeating slot goes to the base schedule's earliest anchor — the
-    // overnight one that genuinely needs a wake. Per-day overrides (a weekend with
-    // its own times) cannot share that slot, so their anchors are covered by one-time
-    // events below, along with every non-earliest anchor.
-    let base_anchors = cfg.anchors()?;
-    let earliest = base_anchors.iter().min().copied().ok_or_else(|| anyhow!("no anchors configured"))?;
-    let base_weekdays = cfg.weekday_set()?;
+    // The one repeating slot, derived from the schedule as it actually resolves rather
+    // than from the `anchors`/`weekdays` shorthand — a fully per-day config leaves that
+    // shorthand empty, and reading it directly made this abort with "no anchors
+    // configured" and arm nothing at all.
+    let slot = repeat_slot(cfg)?
+        .ok_or_else(|| anyhow!("no anchors scheduled on any day — check `weekdays` and `[schedules]`"))?;
+    let (earliest, repeat_days) = slot;
 
     let mode = cfg.mode()?;
     let (h, m, _) = earliest.local_hm(cfg.today()?, mode)?;
     let time_local = format!("{h:02}:{m:02}:00");
-    let weekdays: String = base_weekdays.iter().copied().map(config::pmset_weekday_char).collect();
+    let weekdays: String = repeat_days.iter().copied().map(config::pmset_weekday_char).collect();
     set_repeat(&time_local, &weekdays)?;
     ledger.repeat_time_local = Some(time_local);
     ledger.repeat_weekdays = Some(weekdays);
@@ -52,7 +71,7 @@ pub fn arm(cfg: &Config) -> Result<WakeLedger> {
     let now = Local::now();
     for offset in 0..HORIZON_DAYS {
         let date = cfg.today()? + Duration::days(offset);
-        let covered_by_repeat = base_weekdays.contains(&date.weekday());
+        let covered_by_repeat = repeat_days.contains(&date.weekday());
         for anchor in cfg.anchors_for(date)? {
             if covered_by_repeat && anchor == earliest {
                 continue;
@@ -178,6 +197,46 @@ mod tests {
         let mine = ours(&events);
         assert_eq!(mine.len(), 1);
         assert!(mine[0].contains("claude-primer"));
+    }
+
+    #[test]
+    fn the_repeat_slot_comes_from_the_resolved_schedule() {
+        // A fully per-day config leaves `anchors`/`weekdays` empty. Reading those
+        // directly aborted with "no anchors configured" and armed nothing.
+        let mut c = Config::default();
+        c.anchors = vec![];
+        c.weekdays = vec![];
+        for d in ["Tue", "Wed", "Thu", "Fri"] {
+            c.schedules.insert(d.into(), vec!["05:30".into(), "10:30".into()]);
+        }
+        c.schedules.insert("Mon".into(), vec!["00:30".into(), "05:30".into()]);
+        c.schedules.insert("Sat".into(), vec!["08:30".into()]);
+
+        let (anchor, days) = repeat_slot(&c).unwrap().expect("a slot must be found");
+        // 05:30 is first on four days; 00:30 and 08:30 on one each.
+        assert_eq!(anchor.label(), "05:30");
+        assert_eq!(days.len(), 4);
+        assert!(days.contains(&chrono::Weekday::Tue));
+        assert!(!days.contains(&chrono::Weekday::Mon), "Monday's first anchor is 00:30");
+    }
+
+    #[test]
+    fn ties_break_toward_the_earlier_time() {
+        let mut c = Config::default();
+        c.anchors = vec![];
+        c.weekdays = vec![];
+        c.schedules.insert("Mon".into(), vec!["06:00".into()]);
+        c.schedules.insert("Tue".into(), vec!["07:00".into()]);
+        let (anchor, _) = repeat_slot(&c).unwrap().unwrap();
+        assert_eq!(anchor.label(), "06:00");
+    }
+
+    #[test]
+    fn an_empty_schedule_has_no_slot() {
+        let mut c = Config::default();
+        c.anchors = vec![];
+        c.weekdays = vec![];
+        assert!(repeat_slot(&c).unwrap().is_none());
     }
 
     #[test]
