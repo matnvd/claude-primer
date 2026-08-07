@@ -1,4 +1,4 @@
-use crate::config::{self, Config, AGENT_LABEL, DAEMON_LABEL};
+use crate::config::{self, Config, AGENT_LABEL, DAEMON_LABEL, MENUBAR_LABEL};
 use anyhow::{anyhow, Context, Result};
 use plist::Value;
 use std::collections::BTreeMap;
@@ -117,6 +117,84 @@ pub fn uid() -> u32 {
 extern "C" {
     #[link_name = "getuid"]
     fn libc_getuid() -> u32;
+}
+
+// ---------------------------------------------------------------------------
+// Menu bar app: launch at login
+//
+// A LaunchAgent rather than SMAppService. The bundle is ad-hoc signed, and
+// SMAppService's behaviour depends on signing identity; launchd's does not. It also
+// keeps every plist this tool writes in one module instead of splitting ownership
+// with the Swift side.
+// ---------------------------------------------------------------------------
+
+pub fn menubar_plist_path() -> Result<PathBuf> {
+    Ok(config::home()?.join("Library/LaunchAgents").join(format!("{MENUBAR_LABEL}.plist")))
+}
+
+/// `KeepAlive` restarts the app if it ever crashes; `RunAtLoad` starts it at login.
+/// Points at the executable inside the bundle, not `open`, so launchd supervises the
+/// process directly.
+pub fn write_menubar_agent(app: &std::path::Path) -> Result<PathBuf> {
+    let exe = app.join("Contents/MacOS/ClaudePrimer");
+    if !exe.exists() {
+        return Err(anyhow!(
+            "no menu bar app at {}\n\nBuild and install it first:\n  make menubar && make install",
+            app.display()
+        ));
+    }
+
+    let mut root: BTreeMap<String, Value> = BTreeMap::new();
+    root.insert("Label".into(), Value::String(MENUBAR_LABEL.into()));
+    root.insert(
+        "ProgramArguments".into(),
+        Value::Array(vec![Value::String(exe.display().to_string())]),
+    );
+    root.insert("RunAtLoad".into(), Value::Boolean(true));
+    root.insert("KeepAlive".into(), Value::Boolean(true));
+
+    let path = menubar_plist_path()?;
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    plist::to_file_xml(&path, &Value::Dictionary(root.into_iter().collect()))
+        .with_context(|| format!("could not write {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn bootstrap_menubar(path: &PathBuf) -> Result<()> {
+    bootstrap_labeled(MENUBAR_LABEL, path)
+}
+
+/// Kill any running copy of the menu bar app, so enabling the login agent replaces a
+/// hand-launched instance instead of adding a second menu bar icon beside it.
+/// Best-effort: a failure here is not worth aborting the enable for.
+pub fn terminate_menubar_instances() {
+    let _ = Command::new("/usr/bin/pkill")
+        .args(["-f", "ClaudePrimer.app/Contents/MacOS/ClaudePrimer"])
+        .output();
+}
+
+pub fn bootout_menubar() -> Result<bool> {
+    let out = Command::new("/bin/launchctl")
+        .args(["bootout", &format!("gui/{}/{}", uid(), MENUBAR_LABEL)])
+        .output()?;
+    Ok(out.status.success())
+}
+
+fn bootstrap_labeled(label: &str, path: &PathBuf) -> Result<()> {
+    let _ = Command::new("/bin/launchctl")
+        .args(["bootout", &format!("gui/{}/{}", uid(), label)])
+        .output();
+    let out = Command::new("/bin/launchctl")
+        .args(["bootstrap", &format!("gui/{}", uid()), &path.display().to_string()])
+        .output()
+        .context("launchctl bootstrap failed to execute")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "launchctl bootstrap: {}",
+            String::from_utf8_lossy(&out.stderr).trim().to_string()
+        ));
+    }
+    Ok(())
 }
 
 pub fn bootstrap_agent(path: &PathBuf) -> Result<()> {
