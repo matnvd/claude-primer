@@ -157,9 +157,17 @@ fn cmd_install(token: Option<String>, no_statusline: bool) -> Result<()> {
         ));
     }
 
+    // Reuse the installed token when one exists, so reinstalling to apply a schedule
+    // change doesn't silently downgrade auth to the keychain.
     let token = match token {
         Some(t) => Some(t),
-        None => prompt_token()?,
+        None => match launchd::existing_token() {
+            Some(t) => {
+                println!("reusing the token already installed (pass --token to replace it)");
+                Some(t)
+            }
+            None => prompt_token()?,
+        },
     };
     if token.is_none() {
         eprintln!(

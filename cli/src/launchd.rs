@@ -6,6 +6,26 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// The OAuth token already stored in the installed LaunchAgent, if any.
+///
+/// Reinstalling is the documented way to apply a schedule change, so it must not cost
+/// you the token — without this, every `install` after the first silently downgraded
+/// auth to the login keychain, which is unavailable exactly when a prime needs it
+/// (screen locked, or after a cold boot).
+pub fn existing_token() -> Option<String> {
+    let path = agent_plist_path().ok()?;
+    let Value::Dictionary(root) = plist::from_file::<_, Value>(path).ok()? else {
+        return None;
+    };
+    let Some(Value::Dictionary(env)) = root.get("EnvironmentVariables") else {
+        return None;
+    };
+    match env.get("CLAUDE_CODE_OAUTH_TOKEN") {
+        Some(Value::String(t)) if !t.is_empty() => Some(t.clone()),
+        _ => None,
+    }
+}
+
 pub fn agent_plist_path() -> Result<PathBuf> {
     Ok(config::home()?.join("Library/LaunchAgents").join(format!("{AGENT_LABEL}.plist")))
 }
