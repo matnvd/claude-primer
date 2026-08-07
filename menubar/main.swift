@@ -17,13 +17,14 @@ struct Snapshot: Decodable {
     let window: WindowState
     let nextPrime: Prime?
     let today: Today
+    let recent: [RunSummary]
     let upcoming: [Prime]
     let units: Units
     let health: Health
     let paths: Paths
 
     enum CodingKeys: String, CodingKey {
-        case window, today, upcoming, units, health, paths
+        case window, today, recent, upcoming, units, health, paths
         case nextPrime = "next_prime"
     }
 }
@@ -52,10 +53,9 @@ struct Today: Decodable {
     let expected: Int
     let done: Int
     let hadStaleMiss: Bool
-    let runs: [RunSummary]
 
     enum CodingKeys: String, CodingKey {
-        case scheduled, expected, done, runs
+        case scheduled, expected, done
         case hadStaleMiss = "had_stale_miss"
     }
 }
@@ -261,6 +261,14 @@ enum Fmt {
         return String(format: "%dh%02dm", m / 60, m % 60)
     }
 
+    /// Time alone for today, prefixed with the weekday otherwise — the list can span
+    /// days now, and a bare "05:30" would be ambiguous.
+    static func stamp(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "EEE HH:mm"
+        return f.string(from: date)
+    }
+
     static func dayAndTime(_ date: Date) -> String {
         let f = DateFormatter()
         f.dateFormat = "EEE HH:mm"
@@ -368,12 +376,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             m.addItem(disabled("⚠︎ agent not loaded — run: claude-primer install"))
         }
 
-        // Only runs that mean something to a reader; dry-runs are noise here.
-        let interesting = snap.today.runs.filter { $0.outcome != "dry_run" }
-        if !interesting.isEmpty {
+        // The last few runs whenever they happened, so the list isn't empty just after
+        // midnight. Dry-runs are already filtered out by the CLI.
+        if !snap.recent.isEmpty {
             m.addItem(.separator())
-            for r in interesting.suffix(6) {
-                m.addItem(disabled("\(Fmt.hm(r.ts))  \(r.anchor)  \(r.label)"))
+            for r in snap.recent {
+                m.addItem(disabled("\(Fmt.stamp(r.ts))  \(r.anchor)  \(r.label)"))
             }
         }
 

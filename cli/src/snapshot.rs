@@ -23,6 +23,10 @@ pub struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_prime: Option<Prime>,
     pub today: Today,
+    /// The last few runs, newest last, regardless of which day they fell on — so the
+    /// menu still has something to show just after midnight. Dry-runs are filtered out
+    /// here rather than in the UI, keeping the decision in one place.
+    pub recent: Vec<RunSummary>,
     pub upcoming: Vec<Prime>,
     pub units: Units,
     /// Severity is resolved here, once, so the Swift side never re-derives it and the
@@ -56,7 +60,6 @@ pub struct Today {
     pub had_stale_miss: bool,
     /// A prime ran but opened nothing — quota spent, schedule unmoved.
     pub had_wasted: bool,
-    pub runs: Vec<RunSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +146,9 @@ pub fn gather(cfg: &Config, now: DateTime<Local>) -> Result<Readout> {
     })
 }
 
+/// How many past runs the menu shows.
+const RECENT_RUNS: usize = 3;
+
 pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
     let snap = gather(cfg, now)?;
     let started_at = state::last_window_start()?;
@@ -165,16 +171,25 @@ pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
         .map(|(_, a, at)| Prime { at, anchor: a.label() })
         .collect();
 
-    let runs: Vec<RunSummary> = state::runs_on_date(now.date_naive())?
+    let summarize = |r: crate::state::RunRecord| RunSummary {
+        ts: r.ts,
+        anchor: r.anchor,
+        outcome: r.outcome,
+        label: r.outcome.label().to_string(),
+        cost_usd: r.cost_usd,
+    };
+
+    // Today's runs feed the health check only; they are no longer serialized, since
+    // `recent` is what the menu renders.
+    let runs: Vec<RunSummary> =
+        state::runs_on_date(now.date_naive())?.into_iter().map(summarize).collect();
+
+    let mut past: Vec<_> = state::read_runs()?
         .into_iter()
-        .map(|r| RunSummary {
-            ts: r.ts,
-            anchor: r.anchor,
-            outcome: r.outcome,
-            label: r.outcome.label().to_string(),
-            cost_usd: r.cost_usd,
-        })
+        .filter(|r| r.outcome != Outcome::DryRun)
         .collect();
+    let recent: Vec<RunSummary> =
+        past.split_off(past.len().saturating_sub(RECENT_RUNS)).into_iter().map(summarize).collect();
 
     let agent = unit_state(AGENT_LABEL);
     let daemon = unit_state(DAEMON_LABEL);
@@ -191,8 +206,8 @@ pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
             done: snap.primes_done,
             had_stale_miss: snap.had_stale_miss,
             had_wasted: snap.had_wasted,
-            runs,
         },
+        recent,
         upcoming,
         units: Units { agent, daemon },
         health,
