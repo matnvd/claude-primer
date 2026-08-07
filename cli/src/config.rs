@@ -75,6 +75,14 @@ pub struct Config {
     pub notify_on: NotifyOn,
     pub on_missed: OnMissed,
     pub grace_minutes: i64,
+    /// How long a scheduled prime may wait for an already-open window to expire, rather
+    /// than firing into it and opening nothing. 0 disables waiting.
+    #[serde(default = "default_boundary_wait")]
+    pub boundary_wait_secs: i64,
+}
+
+fn default_boundary_wait() -> i64 {
+    300
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +118,7 @@ impl Default for Config {
             notify_on: NotifyOn::Failure,
             on_missed: OnMissed::Skip,
             grace_minutes: 20,
+            boundary_wait_secs: default_boundary_wait(),
         }
     }
 }
@@ -264,6 +273,12 @@ on_missed = "skip"
 
 # How late an anchor may fire and still count as on time.
 grace_minutes = 20
+
+# A prime that fires while a window is still open opens nothing — it just spends
+# quota from the window already running. When the open window is about to expire,
+# wait this many seconds for it rather than wasting the prime. This is what makes
+# anchors spaced close to 5h apart survive a little drift. 0 disables waiting.
+boundary_wait_secs = 300
 
 # Per-day schedules. A day here uses its own times and is active whether or not it
 # appears in `weekdays`. An empty list turns a day off. Uncomment to use:

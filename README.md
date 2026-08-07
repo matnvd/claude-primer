@@ -248,6 +248,7 @@ timezone      = "local"                          # this Mac's clock; macOS handl
 notify_on     = "failure"                        # "failure" | "never" | "always"
 on_missed     = "skip"                           # "skip" | "shift"
 grace_minutes = 20
+boundary_wait_secs = 300                         # wait out a closing window; 0 disables
 ```
 
 After editing, **re-run `claude-primer install`** to regenerate the launchd units — anchor times are baked into the plist as `StartCalendarInterval` entries. `status` reflects an edit immediately, but the live schedule won't until you reinstall.
@@ -255,16 +256,42 @@ After editing, **re-run `claude-primer install`** to regenerate the launchd unit
 > **Space your anchors more than 5 hours apart.**
 >
 > A prime opens a window that runs for exactly 5 hours. Any anchor that falls inside a
-> still-open window spends quota and opens nothing — the window doesn't extend, and no new
-> one starts until you next send a message.
+> still-open window opens nothing — the window doesn't extend, and no new one starts until
+> you next send a message.
 >
-> Gaps of exactly `5h00m` are the trap: a prime takes 2–11 seconds and launchd can fire a
-> moment early, so the next anchor lands just inside the previous window. Leave a few minutes
-> of slack (`05:30, 10:35, 15:40`). **Watch the wrap past midnight too** — a `20:30` anchor
-> runs to `01:30`, so a `00:30` anchor the next morning is wasted every single day.
+> Small drift is handled for you: if the open window is about to close, the prime **waits
+> for it** rather than wasting itself (see below). What it can't rescue is an anchor placed
+> deep inside another window. **Watch the wrap past midnight especially** — a `20:30` anchor
+> runs to `01:30`, so a `00:30` anchor the next morning is an hour inside it and is wasted
+> every single day.
 >
-> When it happens, `runs.jsonl` records `wasted: window already open` with the time it
+> When that happens, `runs.jsonl` records `wasted: window already open` with the time it
 > collided with, and the status line shows `⚠`.
+
+### Waiting out a closing window
+
+Anchors spaced near 5 hours apart are fragile on their own: a prime takes 2–11 seconds and
+launchd can fire a moment early, so anchor N+1 lands just *inside* the window anchor N
+opened — and one second of drift would otherwise waste every remaining prime that day.
+
+So a scheduled prime that finds a window closing shortly will sleep until it does:
+
+```
+11:24 — window closes at 11:24:21; waiting 15s so this prime opens a new one
+11:24 — ok in 11687ms
+```
+
+`boundary_wait_secs` (default 300) caps the wait. Two things bound it further:
+
+- **It never waits past your grace budget.** Waiting must not produce a window the staleness
+  guard had already judged too late to open, so the wait is capped by whatever remains of
+  `grace_minutes`. A prime that's already 18 minutes late gets at most 2 more.
+- **Manual primes never wait.** "Prime now" and `--force` mean *now*; sleeping under a button
+  press would be surprising. Those report the wasted outcome instead.
+
+It aims a few seconds past the expiry rather than exactly at it, because the expiry is this
+tool's own local estimate and the server's view may differ slightly. Set
+`boundary_wait_secs = 0` to switch waiting off entirely.
 
 ### Setting times per day
 

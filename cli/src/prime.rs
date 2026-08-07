@@ -112,6 +112,48 @@ pub fn resolve_auto(cfg: &Config, now: chrono::DateTime<Local>) -> Result<Anchor
         .ok_or_else(|| anyhow::anyhow!("no anchors configured"))
 }
 
+/// Seconds past the window's expiry to aim for. The expiry is our own local estimate,
+/// so landing exactly on it risks the server still considering the window open.
+const BOUNDARY_OVERSHOOT_SECS: i64 = 10;
+
+/// How long to wait for an open window to expire, or `None` to not wait at all.
+///
+/// Bounded by two things. `boundary_wait_secs` caps how long a scheduled job may sit
+/// blocked. The remaining grace budget caps it too — waiting must never push a prime
+/// past the staleness threshold it just passed, or the tool would produce a window it
+/// had already decided was too late to open.
+fn boundary_wait(
+    cfg: &Config,
+    now: chrono::DateTime<Local>,
+    until: chrono::DateTime<Local>,
+    scheduled: Option<Anchor>,
+    forced: bool,
+) -> Option<std::time::Duration> {
+    // A manual prime means "now". Silently sleeping under a button press would be
+    // surprising, so those report the wasted outcome instead.
+    if forced || cfg.boundary_wait_secs == 0 {
+        return None;
+    }
+    let anchor = scheduled?;
+    let due = anchor
+        .local_on(cfg.today().ok()?, cfg.mode().ok()?)
+        .ok()?;
+
+    // Nothing to wait for. Checked before adding the overshoot, or an already-expired
+    // window would still produce a pointless sleep.
+    let remaining = (until - now).num_seconds();
+    if remaining <= 0 {
+        return None;
+    }
+    let need = remaining + BOUNDARY_OVERSHOOT_SECS;
+
+    let already_late = (now - due).num_seconds().max(0);
+    let grace_left = cfg.grace_minutes * 60 - already_late;
+    let budget = cfg.boundary_wait_secs.min(grace_left.max(0));
+
+    (need <= budget).then(|| std::time::Duration::from_secs(need as u64))
+}
+
 pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
     let now = Local::now();
 
@@ -176,9 +218,32 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
     // A prime that lands inside an open window opens nothing — it only spends quota
     // from the window already running. Anchors spaced exactly 5h apart make that easy
     // to hit, since a few seconds of drift is enough.
-    let window_open_until = state::last_window_start()?
+    let mut window_open_until = state::last_window_start()?
         .map(|start| start + crate::window::window_len())
         .filter(|end| *end > now);
+
+    // If that window is about to expire, wait it out rather than burning the prime.
+    // Anchors spaced exactly 5h apart put every later prime a few seconds inside the
+    // previous window, so without this a one-second drift wastes the whole rest of the
+    // day's schedule.
+    if let Some(until) = window_open_until {
+        if let Some(wait) = boundary_wait(cfg, now, until, scheduled, args.force) {
+            println!(
+                "{} — window closes at {}; waiting {}s so this prime opens a new one",
+                args.anchor,
+                until.format("%H:%M:%S"),
+                wait.as_secs()
+            );
+            std::thread::sleep(wait);
+            // Re-sample: the wait was calculated to outlast the window, so this should
+            // now be None. Reading it again rather than assuming keeps the outcome
+            // honest if anything opened a window while we slept.
+            let after = Local::now();
+            window_open_until = state::last_window_start()?
+                .map(|start| start + crate::window::window_len())
+                .filter(|end| *end > after);
+        }
+    }
 
     let started = std::time::Instant::now();
     let out = Command::new(&cfg.claude_bin)
@@ -379,6 +444,99 @@ mod tests {
         use chrono::TimeZone;
         let d = Local::now().date_naive().and_hms_opt(h, m, 0).unwrap();
         Local.from_local_datetime(&d).earliest().unwrap()
+    }
+
+    fn secs(d: Option<std::time::Duration>) -> Option<u64> { d.map(|x| x.as_secs()) }
+
+    #[test]
+    fn waits_out_a_window_that_is_about_to_close() {
+        // The whole point: a one-second drift must not waste the prime.
+        let c = cfg();
+        let now = at(10, 30);
+        let until = now + chrono::Duration::seconds(3);
+        let w = boundary_wait(&c, now, until, Anchor::parse("10:30").ok(), false);
+        // 3s of window + the overshoot that guards against clock skew.
+        assert_eq!(secs(w), Some(3 + BOUNDARY_OVERSHOOT_SECS as u64));
+    }
+
+    #[test]
+    fn does_not_wait_out_a_window_with_hours_left() {
+        // A 00:30 anchor sitting an hour inside the previous window is a schedule
+        // mistake, not drift. Blocking the job for an hour would be worse than saying so.
+        let c = cfg();
+        let now = at(10, 30);
+        let until = now + chrono::Duration::hours(1);
+        assert_eq!(boundary_wait(&c, now, until, Anchor::parse("10:30").ok(), false), None);
+    }
+
+    #[test]
+    fn never_waits_past_the_grace_budget() {
+        // Waiting must not produce a window the staleness guard had already judged too
+        // late to open. With 20m grace and 18m already lost, only 2m of budget remain.
+        let c = cfg();
+        let now = at(10, 48);
+        let until = now + chrono::Duration::minutes(4);
+        assert_eq!(boundary_wait(&c, now, until, Anchor::parse("10:30").ok(), false), None);
+
+        // The same window, reached on time, is comfortably affordable.
+        let ontime = at(10, 30);
+        let until2 = ontime + chrono::Duration::minutes(4);
+        assert!(boundary_wait(&c, ontime, until2, Anchor::parse("10:30").ok(), false).is_some());
+    }
+
+    #[test]
+    fn a_forced_prime_never_waits() {
+        // "Prime now" means now. Sleeping under a button press would be surprising.
+        let c = cfg();
+        let now = at(10, 30);
+        let until = now + chrono::Duration::seconds(3);
+        assert_eq!(boundary_wait(&c, now, until, Anchor::parse("10:30").ok(), true), None);
+    }
+
+    #[test]
+    fn waiting_can_be_switched_off() {
+        let mut c = cfg();
+        c.boundary_wait_secs = 0;
+        let now = at(10, 30);
+        let until = now + chrono::Duration::seconds(3);
+        assert_eq!(boundary_wait(&c, now, until, Anchor::parse("10:30").ok(), false), None);
+    }
+
+    #[test]
+    fn an_already_expired_window_needs_no_wait() {
+        let c = cfg();
+        let now = at(10, 30);
+        assert_eq!(boundary_wait(&c, now, now - chrono::Duration::seconds(1), Anchor::parse("10:30").ok(), false), None);
+    }
+
+    #[test]
+    fn a_minute_of_drift_does_not_cascade() {
+        // The scenario: 05:30 fires a minute late, so its window runs to 10:31 and the
+        // 10:30 anchor lands inside it. That must resolve to a short wait, not a wasted
+        // prime — otherwise one minute of drift would cost every later prime that day.
+        let c = cfg();
+        let fires = at(10, 30);
+        let window_until = at(10, 31);
+        let w = boundary_wait(&c, fires, window_until, Anchor::parse("10:30").ok(), false)
+            .expect("a minute of drift must be waited out, not wasted");
+        assert_eq!(w.as_secs(), 60 + BOUNDARY_OVERSHOOT_SECS as u64);
+    }
+
+    #[test]
+    fn drift_beyond_the_wait_budget_is_reported_not_waited_out() {
+        // Past boundary_wait_secs the job would be blocked too long to be worth it, so
+        // the prime runs and reports `wasted` instead. With the 300s default, the
+        // breaking point is about five minutes of accumulated drift.
+        let c = cfg(); // boundary_wait_secs = 300
+        let fires = at(10, 30);
+
+        // 4m59s of drift: still inside the budget once the overshoot is added.
+        let ok = boundary_wait(&c, fires, fires + chrono::Duration::seconds(289), Anchor::parse("10:30").ok(), false);
+        assert!(ok.is_some(), "just under the budget should still wait");
+
+        // 5m01s: over the budget, so no wait.
+        let too_far = boundary_wait(&c, fires, fires + chrono::Duration::seconds(301), Anchor::parse("10:30").ok(), false);
+        assert!(too_far.is_none(), "past the budget it should report rather than block");
     }
 
     #[test]
