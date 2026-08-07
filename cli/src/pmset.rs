@@ -23,6 +23,16 @@ pub fn fmt_pmset_datetime(dt: &DateTime<Local>) -> String {
 /// single slot goes to the earliest anchor, which is the one that genuinely needs it
 /// (the Mac is asleep overnight). Later anchors use one-time `schedule` events, which
 /// may exist in quantity but must be re-armed — hence the daily daemon.
+/// `(hour, minute)` moved back by `mins`, plus whether that crossed midnight — in which
+/// case the repeat's weekdays have to move back a day too, or it would wake on the wrong
+/// night.
+fn shift_back(h: u32, m: u32, mins: i64) -> (u32, u32, bool) {
+    let total = h as i64 * 60 + m as i64 - mins;
+    let wrapped = total < 0;
+    let t = total.rem_euclid(24 * 60);
+    ((t / 60) as u32, (t % 60) as u32, wrapped)
+}
+
 /// Which anchor gets the single `pmset repeat` slot, and on which days.
 ///
 /// `man pmset`: "you may only have one pair of repeating events scheduled". So it goes
@@ -61,8 +71,18 @@ pub fn arm(cfg: &Config) -> Result<WakeLedger> {
 
     let mode = cfg.mode()?;
     let (h, m, _) = earliest.local_hm(cfg.today()?, mode)?;
-    let time_local = format!("{h:02}:{m:02}:00");
-    let weekdays: String = repeat_days.iter().copied().map(config::pmset_weekday_char).collect();
+
+    // Apply the same lead as the one-time events. Without it the repeating wake fired
+    // at the anchor time exactly — the same instant launchd started the job, leaving no
+    // margin for the machine to finish waking.
+    let (lead_h, lead_m, day_shift) = shift_back(h, m, WAKE_LEAD);
+    let time_local = format!("{lead_h:02}:{lead_m:02}:00");
+    let weekdays: String = repeat_days
+        .iter()
+        .copied()
+        .map(|d| if day_shift { d.pred() } else { d })
+        .map(config::pmset_weekday_char)
+        .collect();
     set_repeat(&time_local, &weekdays)?;
     ledger.repeat_time_local = Some(time_local);
     ledger.repeat_weekdays = Some(weekdays);
@@ -197,6 +217,20 @@ mod tests {
         let mine = ours(&events);
         assert_eq!(mine.len(), 1);
         assert!(mine[0].contains("claude-primer"));
+    }
+
+    #[test]
+    fn the_repeat_gets_the_same_lead_as_one_time_wakes() {
+        assert_eq!(shift_back(5, 30, 2), (5, 28, false));
+        assert_eq!(shift_back(0, 30, 2), (0, 28, false));
+    }
+
+    #[test]
+    fn a_lead_crossing_midnight_moves_the_weekday_back() {
+        // 00:01 minus 2m is 23:59 the night before, so keeping the same weekday would
+        // wake the Mac a full day early.
+        assert_eq!(shift_back(0, 1, 2), (23, 59, true));
+        assert_eq!(chrono::Weekday::Mon.pred(), chrono::Weekday::Sun);
     }
 
     #[test]
