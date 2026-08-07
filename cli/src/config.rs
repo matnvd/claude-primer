@@ -400,6 +400,14 @@ pub fn wake_ledger() -> Result<PathBuf> {
 
 pub const AGENT_LABEL: &str = "com.claude-primer.agent";
 pub const DAEMON_LABEL: &str = "com.claude-primer.wake";
+/// The menu bar app's launch-at-login agent. Kept here rather than in Swift so every
+/// launchd unit this tool owns is written by one place.
+pub const MENUBAR_LABEL: &str = "com.claude-primer.menubar";
+
+/// Where `make install` puts the menu bar bundle. User-level, so no sudo.
+pub fn menubar_app_path() -> Result<PathBuf> {
+    Ok(home()?.join("Applications/ClaudePrimer.app"))
+}
 /// Identifies our pmset events so cancellation can target them exactly.
 /// `pmset schedule cancelall` must never be used — it would take out the system's
 /// own calendar-alarm and analytics wakes too.

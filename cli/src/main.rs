@@ -2,6 +2,7 @@ mod config;
 mod launchd;
 mod pmset;
 mod prime;
+mod snapshot;
 mod state;
 mod statusline;
 mod window;
@@ -51,6 +52,13 @@ enum Cmd {
     ConfigPath,
     /// One-line readout for Claude Code's status line. Local state only, zero tokens.
     Statusline,
+    /// Print full state as JSON. The contract the menu bar app renders.
+    Snapshot,
+    /// Manage the menu bar app's launch-at-login agent.
+    Menubar {
+        #[command(subcommand)]
+        action: MenubarAction,
+    },
     /// Model the window grid a set of anchors produces. Pure arithmetic, no API calls.
     Simulate {
         #[arg(long, default_value = "09:00-17:00")]
@@ -63,6 +71,16 @@ enum Cmd {
     ArmWakes,
     /// Unload the units and cancel our wake events. Config and logs are kept.
     Uninstall,
+}
+
+#[derive(Subcommand)]
+enum MenubarAction {
+    /// Start the app now and at every login.
+    Enable,
+    /// Stop it and remove the login agent. The app itself is left installed.
+    Disable,
+    /// Report whether the login agent is loaded, as JSON.
+    Status,
 }
 
 fn main() {
@@ -104,6 +122,8 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Statusline => cmd_statusline(),
+        Cmd::Snapshot => cmd_snapshot(),
+        Cmd::Menubar { action } => cmd_menubar(action),
         Cmd::Simulate { workday, anchors } => cmd_simulate(&workday, anchors),
         Cmd::ArmWakes => cmd_arm_wakes(),
         Cmd::Uninstall => cmd_uninstall(),
@@ -380,6 +400,52 @@ fn cmd_status() -> Result<()> {
             late,
             cost
         );
+    }
+    Ok(())
+}
+
+fn cmd_snapshot() -> Result<()> {
+    let cfg = Config::load()?;
+    let snap = snapshot::build(&cfg, Local::now())?;
+    println!("{}", serde_json::to_string_pretty(&snap)?);
+    Ok(())
+}
+
+fn cmd_menubar(action: MenubarAction) -> Result<()> {
+    match action {
+        MenubarAction::Enable => {
+            let app = config::menubar_app_path()?;
+            let plist = launchd::write_menubar_agent(&app)?;
+            // Terminate any instance started by hand first. launchd execs the binary
+            // directly, which bypasses LaunchServices' usual single-instance dedup, so
+            // without this you end up with two menu bar icons. Handled here rather than
+            // by a self-terminating guard in Swift, which would fight KeepAlive and
+            // restart-loop.
+            launchd::terminate_menubar_instances();
+            launchd::bootstrap_menubar(&plist)?;
+            println!("menu bar app enabled — it will start at every login");
+            println!("  app   {}", app.display());
+            println!("  agent {}", plist.display());
+        }
+        MenubarAction::Disable => {
+            let stopped = launchd::bootout_menubar()?;
+            let plist = launchd::menubar_plist_path()?;
+            let removed = std::fs::remove_file(&plist).is_ok();
+            if stopped || removed {
+                println!("menu bar app disabled (the app itself is still installed)");
+            } else {
+                println!("menu bar app was not enabled");
+            }
+        }
+        MenubarAction::Status => {
+            // JSON because the app itself reads this to render its own toggle state.
+            let u = launchd::unit_status(config::MENUBAR_LABEL);
+            println!(
+                r#"{{"enabled":{},"app":{}}}"#,
+                u.loaded,
+                serde_json::to_string(&config::menubar_app_path()?.display().to_string())?
+            );
+        }
     }
     Ok(())
 }

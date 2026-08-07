@@ -1,20 +1,19 @@
-# claude-code-cli-tools
-
-CLI tools for Claude Code. Currently one: **`claude-primer`**.
-
----
-
-## claude-primer
+# claude-primer
 
 Aligns Claude Code's 5-hour usage windows to your workday.
 
-### The problem
+```
+cli/        the claude-primer CLI (Rust)
+menubar/    an optional menu bar app (Swift)
+```
+
+## The problem
 
 Claude Code's usage allowance runs on a **rolling 5-hour session window that starts on your first message** and expires exactly 5 hours later. It's anchored to you, not to the clock.
 
 Left alone, that boundary lands wherever your first prompt of the day happened to fall. Send a throwaway message at 07:12 checking something, and your window now ends at 12:12 — so you hit "limit reached, resets in 3 hours" at 12:12, mid-task, and the next window ends at some equally arbitrary time. The boundary walks around your day.
 
-### The fix
+## The fix
 
 Choose where the boundaries land, by sending one trivial prompt at each intended window start:
 
@@ -26,7 +25,7 @@ prime 15:30  →  window 15:30 ────────── 20:30
 
 Three near-free prompts lay a predictable grid over the workday, and each new window is a fresh allowance. `claude-primer` installs the launchd units and `pmset` wake events that make those primes fire on schedule, unattended, including while the Mac is asleep.
 
-### What it does not do
+## What it does not do
 
 **Priming does not grant more quota.** It controls *when* windows start. There's a secondary effect — an early anchor can expose your workday to three window-allowances instead of two — but that's bounded by the weekly cap, which on Pro is the tighter constraint.
 
@@ -43,15 +42,16 @@ claude-primer simulate --workday 09:00-17:00
 Requires macOS and a Claude Pro/Max/Team/Enterprise subscription.
 
 ```sh
-cargo build --release
-mkdir -p ~/.local/bin
-cp target/release/claude-primer ~/.local/bin/claude-primer
+make install                     # builds both, installs the binary and the app
 
-claude setup-token          # browser login; copy the token it prints
-claude-primer install       # paste the token, then one sudo prompt
+claude setup-token               # browser login; copy the token it prints
+claude-primer install            # paste the token, then one sudo prompt
+claude-primer menubar enable     # optional, see "Menu bar app" below
 ```
 
-Install the binary to a stable path first — `install` refuses to run from `target/`, because the launchd job stores the binary's absolute path permanently and a build-directory path breaks on the next `cargo clean`.
+`make install` puts the binary at `~/.local/bin/claude-primer` deliberately: `claude-primer install` **refuses to run from `cli/target/`**, because the launchd job stores the binary's absolute path permanently and a build-directory path would break on the next `cargo clean`.
+
+Other targets: `make cli`, `make menubar`, `make test`, `make uninstall`, `make clean`.
 
 `install` will:
 
@@ -166,6 +166,60 @@ Register `claude-primer` as Claude Code's status line for an always-visible read
 **This costs zero tokens.** Claude Code runs the status line as a *local subprocess* — it pipes session JSON to stdin and renders stdout. No model is invoked and no network call happens. `claude-primer statusline` only reads local state and does date arithmetic.
 
 > By design, `statusline` never invokes `claude`. Reading window state by shelling out to `/usage` would cost tokens *and*, far worse, **start a new 5-hour window every 30 seconds** — destroying the exact thing this tool exists to control.
+
+---
+
+## Menu bar app
+
+Optional. A small Swift app showing the Claude mark in the menu bar, with the schedule behind it.
+
+```sh
+make install
+claude-primer menubar enable      # starts it now and at every login
+claude-primer menubar disable     # reverses it; the app stays installed
+```
+
+```
+┌──────────────────────────┐
+│ Window ends  19:54       │
+│ Next prime   Fri 05:30   │
+│ Today        ✓ 3/4       │
+│ ──────────────────────── │
+│ 05:30  ok                │
+│ 10:30  ok                │
+│ 15:30  ok                │
+│ ──────────────────────── │
+│ Prime now…               │
+│ Open status in Terminal  │
+│ Edit config…             │
+│ Reveal logs in Finder    │
+│ ──────────────────────── │
+│ Launch at login       ✓  │
+│ Quit                     │
+└──────────────────────────┘
+```
+
+The menu bar shows **just the mark** when everything is fine. A `⚠` appears beside it when a prime was skipped as stale, and a `✗` when the agent isn't loaded or a prime failed — so a problem is visible without opening anything, and a healthy setup is silent.
+
+**"Prime now…" asks for confirmation.** It's the only action here that spends anything: it starts a 5-hour window beginning immediately, which shifts the rest of the day's schedule.
+
+### It is not load-bearing
+
+The app is a **viewer, never a participant.** launchd fires the primes. If it crashes, is quit, is never launched, or you delete it, every prime still fires identically — there is no code path where it can prevent, delay, or corrupt one.
+
+It holds no window arithmetic either. All state comes from `claude-primer snapshot`, so the CLI stays the single source of truth:
+
+```sh
+claude-primer snapshot | jq .
+```
+
+Severity (`health`) is computed in Rust, so the menu bar and `status` can't disagree about what counts as a problem. Like the status line, it reads local files only — zero tokens, zero network, and it never invokes `claude`.
+
+### Building it
+
+`swiftc` against the Command Line Tools SDK. **Full Xcode is not required** — the bundle is assembled by `make menubar` and ad-hoc signed, which is enough for a locally built app (no quarantine flag, so Gatekeeper doesn't prompt).
+
+`LSUIElement` is set, so there's no Dock icon and nothing in the app switcher. Launch-at-login uses a LaunchAgent rather than `SMAppService`, because the bundle is ad-hoc signed and `SMAppService`'s behaviour depends on signing identity while launchd's does not. `menubar enable` terminates any hand-launched copy first, since launchd execs the binary directly and bypasses the usual single-instance dedup.
 
 ---
 
