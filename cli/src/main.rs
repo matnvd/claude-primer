@@ -472,7 +472,7 @@ fn cmd_simulate(workday: &str, anchors: Option<Vec<String>>) -> Result<()> {
     let sim = window::simulate(&anchors, day);
 
     println!(
-        "anchors {}   workday {}–{}   (all times EDT)\n",
+        "anchors {}   workday {}–{}   (all times local)\n",
         anchors.iter().map(|a| a.label()).collect::<Vec<_>>().join(", "),
         day.0.format("%H:%M"),
         day.1.format("%H:%M")

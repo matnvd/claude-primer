@@ -25,17 +25,6 @@ prime 15:30  →  window 15:30 ────────── 20:30
 
 Three near-free prompts lay a predictable grid over the workday, and each new window is a fresh allowance. `claude-primer` installs the launchd units and `pmset` wake events that make those primes fire on schedule, unattended, including while the Mac is asleep.
 
-## What it does not do
-
-**Priming does not grant more quota.** It controls *when* windows start. There's a secondary effect — an early anchor can expose your workday to three window-allowances instead of two — but that's bounded by the weekly cap, which on Pro is the tighter constraint.
-
-Use `simulate` to decide your anchors from arithmetic rather than a guess:
-
-```sh
-claude-primer simulate --workday 09:00-17:00
-```
-
----
 
 ## Install
 
@@ -92,30 +81,10 @@ One line per invocation. Statuses you'll see:
 | Status | Meaning |
 |---|---|
 | `ok` | prime landed and **opened a new window** |
-| `wasted: window already open` | the call succeeded but opened nothing — see below |
+| `wasted: window already open` | the call succeeded but opened nothing — window was already running and doesn't reset the window properly, might want to add buffer time between anchors |
 | `missed: too stale` | anchor passed while the Mac was off; skipped deliberately (see below) |
 | `skipped: not a scheduled weekday` | working as configured |
 | `error` | the `claude` call failed — check `stderr` in the same record |
-
-### Why `ok` and `wasted` are separate
-
-A successful `claude` call is **not** the same as an opened window. If a window is already running when a prime fires, the prompt just draws from that window — quota spent, nothing started.
-
-Reporting that as `ok` would be actively misleading, and it would corrupt every countdown in the tool: `last_window_start` picks the newest record that opened a window, so a mislabelled `ok` would reset the timer to a full 5 hours while the real window ends sooner.
-
-So the outcome is recorded separately, `done/expected` doesn't count it, and the status line shows `⚠`. The record keeps `window_open_until` so you can see what it collided with.
-
-**If you see this repeatedly, your anchors are too close together.** Anchors spaced *exactly* 5 hours apart are fragile: a prime takes a couple of seconds and launchd can fire a moment early or late, so anchor N+1 easily lands a second or two inside the window anchor N opened. Leave a few minutes of slack:
-
-```toml
-# fragile — every gap is exactly 5h00m
-Mon = ["05:30", "10:30", "15:30", "20:30"]
-
-# robust — each anchor lands just after the previous window expires
-Mon = ["05:30", "10:35", "15:40", "20:45"]
-```
-
-`claude-primer simulate` flags the same collision before you commit to a schedule.
 
 ### 3. Are the launchd units loaded?
 
@@ -411,15 +380,3 @@ Thu = ["05:30", "10:30", "15:30","20:30"]
 Fri = ["05:30", "10:30", "15:30"] # friday nights off :)
 Sat = ["08:30", "13:30", "18:30"]
 Sun = ["08:30", "13:30", "18:30"]
-
----
-
-## Policy
-
-Anthropic states that advertised Pro/Max limits "assume ordinary, individual usage of Claude Code and the Agent SDK." A handful of tiny scheduled prompts per day, on your own account, to time your own windows, sits inside that. `claude setup-token` is documented for exactly this kind of scripted use. Keep the volume as designed and don't scale it up.
-
----
-
-## License
-
-See [LICENSE](LICENSE).
