@@ -58,7 +58,21 @@ Install once. **Nothing needs restarting after a reboot** — launchd reloads bo
 claude-primer uninstall
 ```
 
-Boots out both units and cancels only our own wake events. Config and logs are retained.
+Unloads both launchd jobs (`launchctl bootout`) and cancels the `pmset` wake events that `claude-primer` armed — matching each one exactly, so your Mac's own scheduled wakes (calendar alarms, macOS analytics) are left alone. `pmset schedule cancelall` would wipe those too, so it is never used. Your config and logs are kept.
+
+## Is it safe?
+
+Short version: it sends a two-word prompt on a timer, and everything it touches is reversible with one command.
+
+- **It only ever sends one trivial prompt.** `-p "ok"` with an empty tool set. It cannot read your files, run commands, or edit anything — `--tools ""` removes every tool from the model's context, so there is nothing for it to act with.
+- **It runs in an empty directory.** No project `CLAUDE.md`, hooks, or `.mcp.json` are loaded, and its transcripts stay out of your real projects' `--resume` history.
+- **Your token stays on this machine.** Stored in a `0600` LaunchAgent plist, read only by the prime. Nothing is uploaded anywhere.
+- **It never touches other apps' settings.** The one shared file it edits is `~/.claude/settings.json`, to register the status line, and it asks first. `pmset` events are cancelled by exact match so your calendar alarms survive.
+- **It cannot spend money.** On a subscription a prime draws from your usage quota; the dollar figures in the logs are what the request *would* cost at API rates, not a bill.
+- **The menu bar app is read-only.** It renders `claude-primer snapshot` and nothing else. Deleting it does not affect whether primes fire.
+- **`claude-primer uninstall` removes all of it.** Both launchd jobs and its own wake events. `make uninstall` also removes the app.
+
+The honest risks are all about *scheduling*, not safety: a prime landing at a time that opens nothing, or an anchor missed because the Mac was off. Neither can damage anything outside this tool's own state.
 
 ---
 
