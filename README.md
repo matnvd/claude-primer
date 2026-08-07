@@ -64,7 +64,7 @@ Unloads both launchd jobs (`launchctl bootout`) and cancels the `pmset` wake eve
 
 Short version: it sends a two-word prompt on a timer, and everything it touches is reversible with one command.
 
-- **It only ever sends one trivial prompt.** `-p "ok"` with an empty tool set. It cannot read your files, run commands, or edit anything — `--tools ""` removes every tool from the model's context, so there is nothing for it to act with.
+- **It only ever sends one trivial message.** The whole conversation is `-p "ok"`, answered under a replaced system prompt of `"Reply with exactly: OK"` — the replacement is there to drop Claude Code's real system prompt, which is most of the token cost. It cannot read your files, run commands, or edit anything: `--tools ""` removes every tool from the model's context, so there is nothing for it to act with.
 - **It runs in an empty directory.** No project `CLAUDE.md`, hooks, or `.mcp.json` are loaded, and its transcripts stay out of your real projects' `--resume` history.
 - **Your token stays on this machine.** Stored in a `0600` LaunchAgent plist, read only by the prime. Nothing is uploaded anywhere.
 - **It never touches other apps' settings.** The one shared file it edits is `~/.claude/settings.json`, to register the status line, and it asks first. `pmset` events are cancelled by exact match so your calendar alarms survive.
