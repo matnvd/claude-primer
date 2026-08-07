@@ -90,8 +90,17 @@ pub fn daemon_plist_xml(exe: &str) -> Result<Vec<u8>> {
     interval.insert("Hour".to_string(), Value::Integer(3i64.into()));
     interval.insert("Minute".to_string(), Value::Integer(15i64.into()));
 
+    // launchd gives daemons no HOME at all — not even /var/root — so a daemon cannot
+    // find the config, which lives under the *user's* home. Root also has no way to
+    // infer which user it is acting for. Baking the path in at install time is what
+    // makes `arm-wakes` able to run at all; without it every invocation died with
+    // "HOME is not set" and no wake event was ever armed.
+    let mut env = BTreeMap::new();
+    env.insert("HOME".to_string(), Value::String(config::home()?.display().to_string()));
+
     let mut root: BTreeMap<String, Value> = BTreeMap::new();
     root.insert("Label".into(), Value::String(DAEMON_LABEL.into()));
+    root.insert("EnvironmentVariables".into(), Value::Dictionary(env.into_iter().collect()));
     root.insert(
         "ProgramArguments".into(),
         Value::Array(vec![Value::String(exe.into()), Value::String("arm-wakes".into())]),
@@ -258,6 +267,15 @@ pub fn unit_status(label: &str) -> UnitStatus {
 mod tests {
     use super::*;
     use chrono::{Datelike, Weekday};
+
+    #[test]
+    fn the_daemon_plist_carries_home() {
+        // Without this the daemon dies with "HOME is not set" on every run and no wake
+        // event is ever armed — exactly what happened in production.
+        let xml = String::from_utf8(daemon_plist_xml("/usr/local/bin/claude-primer").unwrap()).unwrap();
+        assert!(xml.contains("EnvironmentVariables"), "daemon needs an env block");
+        assert!(xml.contains("<key>HOME</key>"), "daemon cannot find the config without HOME");
+    }
 
     #[test]
     fn launchd_weekdays_are_sunday_zero() {

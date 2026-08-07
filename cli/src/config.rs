@@ -365,9 +365,13 @@ pub fn pmset_weekday_char(w: Weekday) -> char {
 
 
 pub fn home() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("HOME is not set"))
+    std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        anyhow!(
+            "HOME is not set.\n\n\
+             launchd gives daemons no HOME, so the wake daemon needs it written into its\n\
+             plist. Reinstall to regenerate it:  claude-primer install"
+        )
+    })
 }
 
 pub fn config_dir() -> Result<PathBuf> {
