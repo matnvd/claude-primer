@@ -130,13 +130,13 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
         let date = cfg.today()?;
         let mode = cfg.mode()?;
 
-        if !cfg.runs_on(date)? {
-            let rec = RunRecord::new(&args.anchor, Outcome::SkippedNotScheduled);
-            state::append_run(&rec)?;
-            println!("{} — {}", anchor.label(), Outcome::SkippedNotScheduled.label());
-            return Ok(Outcome::SkippedNotScheduled);
-        }
-
+        // No weekday check here on purpose. The installed plist only carries entries
+        // for scheduled days, and the one case it could not cover — a job firing on a
+        // day removed from the config but not yet reinstalled — is the user's to fix by
+        // reinstalling. Every other route to an unscheduled day (manual runs, "Prime
+        // now") sets --force, and launchd catch-up is already handled by the staleness
+        // guard below.
+        //
         // launchd's StartCalendarInterval catches up after the Mac was off or asleep.
         // Priming now would open a window at the wrong time and shift every later
         // boundary, which is worse than skipping.

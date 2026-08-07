@@ -18,8 +18,6 @@ pub enum Outcome {
     /// The anchor passed while the Mac was off or asleep and launchd caught up late.
     /// Firing would have opened a misaligned window, so nothing was spent.
     MissedTooStale,
-    /// Not a scheduled weekday.
-    SkippedNotScheduled,
     /// The `claude` call itself failed.
     Error,
     /// `--dry-run`: the command was composed but never executed.
@@ -32,7 +30,6 @@ impl Outcome {
             Outcome::Ok => "ok",
             Outcome::OkWindowAlreadyOpen => "wasted: window already open",
             Outcome::MissedTooStale => "missed: too stale",
-            Outcome::SkippedNotScheduled => "skipped: not a scheduled weekday",
             Outcome::Error => "error",
             Outcome::DryRun => "dry-run",
         }
@@ -174,7 +171,6 @@ mod tests {
         assert!(!Outcome::MissedTooStale.opened_window());
         assert!(!Outcome::DryRun.opened_window());
         assert!(!Outcome::Error.opened_window());
-        assert!(!Outcome::SkippedNotScheduled.opened_window());
     }
 
     #[test]

@@ -194,11 +194,6 @@ impl Config {
         Ok(Vec::new())
     }
 
-    /// Whether anything is scheduled on this date.
-    pub fn runs_on(&self, date: NaiveDate) -> Result<bool> {
-        Ok(!self.anchors_for(date)?.is_empty())
-    }
-
     /// Every weekday that has at least one anchor, with the anchors that apply.
     pub fn active_days(&self) -> Result<Vec<(Weekday, Vec<Anchor>)>> {
         const ALL: [Weekday; 7] = [
@@ -533,7 +528,7 @@ mod tests {
         let mut c = Config::default();
         c.schedules.insert("Sun".into(), vec!["10:00".into()]);
         let d = nearest_date_with_weekday(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(), Weekday::Sun);
-        assert!(c.runs_on(d).unwrap());
+        assert!(!c.anchors_for(d).unwrap().is_empty());
     }
 
     #[test]
@@ -541,7 +536,7 @@ mod tests {
         let mut c = Config::default();
         c.schedules.insert("Wed".into(), vec![]);
         let d = nearest_date_with_weekday(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(), Weekday::Wed);
-        assert!(!c.runs_on(d).unwrap());
+        assert!(c.anchors_for(d).unwrap().is_empty());
         assert!(on(&c, Weekday::Wed).is_empty());
     }
 

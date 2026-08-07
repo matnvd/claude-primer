@@ -97,7 +97,6 @@ One line per invocation. Statuses you'll see:
 | `ok` | prime landed and **opened a new window** |
 | `wasted: window already open` | the call succeeded but opened nothing — window was already running and doesn't reset the window properly, might want to add buffer time between anchors |
 | `missed: too stale` | anchor passed while the Mac was off; skipped deliberately (see below) |
-| `skipped: not a scheduled weekday` | working as configured |
 | `error` | the `claude` call failed — check `stderr` in the same record |
 
 ### 3. Are the launchd units loaded?
@@ -325,7 +324,7 @@ Notes:
 
 - A day in `[schedules]` is active **whether or not** it appears in `weekdays`.
 - An empty list (`Wed = []`) switches that day off.
-- A day in neither is off. By default that's Saturday and Sunday, and a run then exits with `skipped: not a scheduled weekday`, spending nothing.
+- A day in neither is off — no `StartCalendarInterval` entry is written for it, so nothing fires. By default that's Saturday and Sunday.
 - Omitting `[schedules]` entirely keeps the original behaviour, so existing configs are unaffected.
 
 One consequence worth knowing: `pmset` allows only **one** repeating wake event, and it goes to the earliest anchor of the `anchors`/`weekdays` shorthand. Anchors from `[schedules]` are covered by rolling one-time wake events instead, re-armed daily by the root daemon. Without that daemon, those primes only fire when the Mac is already awake.
