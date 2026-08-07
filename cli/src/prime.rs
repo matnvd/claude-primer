@@ -245,6 +245,12 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
         }
     }
 
+    // The window opens when the server processes the request, which is close to when
+    // the call starts — not when it returns 2–11s later. `ts` is what
+    // `last_window_start` uses as the window's origin, so stamping it after the call
+    // would push every countdown that far into the future and claim time you don't
+    // have. Taken here, before spawning, it errs a shade early instead.
+    let call_started_at = Local::now();
     let started = std::time::Instant::now();
     let out = Command::new(&cfg.claude_bin)
         .args(build_args(cfg))
@@ -274,6 +280,7 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
     };
 
     let mut rec = RunRecord::new(&args.anchor, outcome);
+    rec.ts = call_started_at;
     rec.window_open_until = window_open_until;
     rec.duration_ms = Some(elapsed);
     rec.scheduled_for = scheduled.and_then(|a| cfg.today().ok().zip(cfg.mode().ok()).and_then(|(d, m)| a.local_on(d, m).ok()));
@@ -507,6 +514,18 @@ mod tests {
         let c = cfg();
         let now = at(10, 30);
         assert_eq!(boundary_wait(&c, now, now - chrono::Duration::seconds(1), Anchor::parse("10:30").ok(), false), None);
+    }
+
+    #[test]
+    fn the_window_timestamp_is_taken_before_the_call() {
+        // `ts` is the origin every countdown is measured from. Stamping it after the
+        // call would silently add the call's 2-11s to every window the tool reports.
+        let src = include_str!("prime.rs");
+        let impl_src = src.split("#[cfg(test)]").next().unwrap();
+        let stamped = impl_src.find("let call_started_at").expect("timestamp must be captured");
+        let spawned = impl_src.find("Command::new(&cfg.claude_bin)").expect("call must exist");
+        assert!(stamped < spawned, "the window timestamp must be taken before the call");
+        assert!(impl_src.contains("rec.ts = call_started_at"), "and it must be the one recorded");
     }
 
     #[test]
