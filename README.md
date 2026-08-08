@@ -93,6 +93,21 @@ The only risks surround *scheduling*, not safety: a prime landing at a time that
 
 ---
 
+## Commands
+
+| Command | Does | Spends |
+|---|---|---|
+| `install` | Writes and loads both launchd units, arms the wakes. `--token` replaces the stored credential | no |
+| `run` | Sends one prime. `--dry-run` composes without executing; `--force` bypasses the guards | **yes** |
+| `status` | Schedule, recent runs, unit health, armed wakes, current window | no |
+| `snapshot` | State as JSON. `--usage` adds real session/week percentages | no |
+| `menubar` | `enable` / `disable` / `status` for the app's launch-at-login agent | no |
+| `config-path` | Prints the config path, for `code $(claude-primer config-path)` | no |
+| `arm-wakes` | Re-arms rolling `pmset` wake events. Run as root by the daemon | no |
+| `uninstall` | Unloads both units, cancels only its own wake events | no |
+
+---
+
 ## Verifying it works
 
 A prime is a headless `claude -p` subprocess that lives about two seconds. There is **no visible UI** — no window, no dock icon, no notification, no sound. If you're at the Mac when one fires, you'll see nothing. So here's where to actually look.
@@ -142,7 +157,13 @@ You should see one repeating event for the first anchor and one-time `wake` even
 
 ### 5. `/usage` — the actual goal
 
-In any interactive Claude Code session, run `/usage`. The 5-hour window should report as starting at your prime time. This is the ground truth that the whole tool exists to move.
+The ground truth the whole tool exists to move. Either run `/usage` in a Claude Code session, or read the same numbers without leaving the terminal:
+
+```sh
+claude-primer snapshot --usage | jq .usage
+```
+
+After a prime lands, the session reset time should be five hours from it. When it *isn't*, something opened a window this tool can't see — that's the one number worth trusting over anything else it reports.
 
 ### 6. The session transcript
 
@@ -165,7 +186,7 @@ Anchors that fall while the Mac is fully shut down are simply missed. With FileV
 
 ## Menu bar app
 
-Optional. A small Swift app showing the Claude mark in the menu bar, with the schedule behind it.
+Optional. A small Swift app showing the Claude mark in the menu bar, with your real usage behind it.
 
 ```sh
 make install
@@ -173,29 +194,59 @@ claude-primer menubar enable      # starts it now and at every login
 claude-primer menubar disable     # reverses it; the app stays installed
 ```
 
+Open it by clicking the mark, or with **⌃⌥C** from anywhere.
+
 ```
-┌──────────────────────────┐
-│ Window ends  19:54       │
-│ Next prime   Fri 05:30   │
-│ Today        ✓ 3/4       │
-│ ──────────────────────── │
-│ 05:30  ok                │
-│ 10:30  ok                │
-│ 15:30  ok                │
-│ ──────────────────────── │
-│ Prime now…               │
-│ Open status in Terminal  │
-│ Edit config…             │
-│ Reveal logs in Finder    │
-│ ──────────────────────── │
-│ Launch at login       ✓  │
-│ Quit                     │
-└──────────────────────────┘
+┌──────────────────────────────────────┐
+│ Session      51%         resets 17:29│
+│ This week    68%         resets Mon …│
+│ ──────────────────────────────────── │
+│ Last prime   Sat 13:30   ✗           │
+│ Next prime   Sat 18:30               │
+│ Today        0/3         ⚠           │
+│ ──────────────────────────────────── │
+│ Prime now…                           │
+│ Open status in Terminal              │
+│ Edit config…                         │
+│ Reveal logs in Finder                │
+│ ──────────────────────────────────── │
+│ Launch at login                   ✓  │
+│ Quit                                 │
+└──────────────────────────────────────┘
 ```
 
-The menu bar shows **just the mark** when everything is fine. A `⚠` appears beside it when a prime was skipped as stale, and a `✗` when the agent isn't loaded or a prime failed — so a problem is visible without opening anything, and a healthy setup is silent.
+The top two rows are **real**, read from Claude Code itself — see [Real usage](#real-usage) below. Everything under the divider is this tool's own record.
+
+Markers are per-row: `Last prime` shows that prime's outcome (`✓` ok, `✗` error, `⚠` wasted or missed), while `Today` shows the day overall. They can differ — one failure on an otherwise fine day, or a clean last prime after an earlier miss.
+
+In the menu bar itself you see **just the mark** when everything is fine. A `⚠` joins it when a prime was skipped or wasted, and a `✗` when the agent isn't loaded or a prime failed — so a problem is visible without opening anything, and a healthy setup is silent.
 
 **"Prime now…" asks for confirmation.** It's the only action here that spends anything: it starts a 5-hour window beginning immediately, which shifts the rest of the day's schedule.
+
+### Real usage
+
+`claude-primer snapshot --usage` asks Claude Code for the actual numbers:
+
+```sh
+claude-primer snapshot --usage | jq .usage
+```
+
+```json
+{
+  "session_pct": 51,
+  "session_resets_at": "2026-08-08T17:29:00-03:00",
+  "week_pct": 68,
+  "week_resets_at": "2026-08-10T05:59:00-03:00"
+}
+```
+
+**This costs nothing.** It runs `claude -p "/usage"`, which Claude Code answers client-side: measured at `total_cost_usd: 0`, zero tokens, and repeated calls leave the window's reset time unchanged. It does not open a window, which is what makes it safe to poll at all.
+
+Why this matters more than it sounds: everything else the tool reports about your window is **inferred from its own primes**, and is simply wrong whenever a window was opened somewhere it can't see — claude.ai, another machine, an interactive session. These two rows are the only authoritative numbers in the app.
+
+The app fetches them on a **5-minute background timer** and again when you open the menu, both off the main thread. Opening is instant; a late result updates the two rows in place. The 30-second poll behind the icon is unaffected — it reads local files only and never contacts Anthropic.
+
+The numbers are parsed out of human-readable prose rather than a stable JSON contract, so any parse failure degrades to omitting the rows rather than showing a confidently wrong figure.
 
 ### It is not load-bearing
 
@@ -207,11 +258,17 @@ It holds no window arithmetic either. All state comes from `claude-primer snapsh
 claude-primer snapshot | jq .
 ```
 
-Severity (`health`) is computed in Rust, so the menu bar and `status` can't disagree about what counts as a problem. It reads local files only — zero tokens, zero network, and it never invokes `claude`.
+Severity (`health`) is computed in Rust, so the menu bar and `status` can't disagree about what counts as a problem.
+
+The only `claude` invocation it can make is `/usage`, which spends nothing and opens no window; a test asserts that is the sole prompt it can ever pass. That call is pinned to the same empty working directory the primes use.
 
 ### Building it
 
 `swiftc` against the Command Line Tools SDK. **Full Xcode is not required** — the bundle is assembled by `make menubar` and ad-hoc signed, which is enough for a locally built app (no quarantine flag, so Gatekeeper doesn't prompt).
+
+`make install` **restarts the app** if it was already running — replacing the bundle on disk doesn't touch the running process, so without that a reinstall silently appears to do nothing.
+
+The **⌃⌥C** shortcut uses Carbon's `RegisterEventHotKey` rather than `NSEvent.addGlobalMonitorForEvents`. The AppKit route can observe every keystroke you type, so macOS gates it behind an Accessibility prompt; the Carbon one registers a single combination with the window server, hears nothing else, and needs no permission. It is unregistered on quit so it doesn't linger.
 
 `LSUIElement` is set, so there's no Dock icon and nothing in the app switcher. Launch-at-login uses a LaunchAgent rather than `SMAppService`, because the bundle is ad-hoc signed and `SMAppService`'s behaviour depends on signing identity while launchd's does not. `menubar enable` terminates any hand-launched copy first, since launchd execs the binary directly and bypasses the usual single-instance dedup.
 
