@@ -10,6 +10,12 @@
 // the side with tests.
 
 import AppKit
+// Carbon, purely for RegisterEventHotKey. The AppKit alternative,
+// NSEvent.addGlobalMonitorForEvents, requires Accessibility permission — it can observe
+// *every* keystroke, so macOS gates it behind a prompt. RegisterEventHotKey registers
+// one combination with the window server and receives nothing else, so it needs no
+// permission and raises no dialog.
+import Carbon.HIToolbox
 
 // MARK: - The snapshot contract (mirrors cli/src/snapshot.rs)
 
@@ -304,6 +310,17 @@ enum Fmt {
     }
 }
 
+// MARK: - Global hotkey
+
+/// Posted from the Carbon callback, which must be a bare C function and so cannot
+/// capture the delegate.
+private let hotKeyFired = Notification.Name("ClaudePrimerHotKeyFired")
+
+private func hotKeyCallback(_: EventHandlerCallRef?, _: EventRef?, _: UnsafeMutableRawPointer?) -> OSStatus {
+    NotificationCenter.default.post(name: hotKeyFired, object: nil)
+    return noErr
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -320,6 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// rebuild a menu the user is already reading.
     private weak var sessionRow: NSMenuItem?
     private weak var weekRow: NSMenuItem?
+    private var hotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -336,11 +354,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         startWatchingRunsLog()
 
+        registerHotKey()
+
         // Keep the cache warm so opening the menu is instant. Five minutes is plenty
         // for a percentage that moves slowly, and it is 12 calls an hour rather than 120.
         refreshUsage()
         usageTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             self?.refreshUsage()
+        }
+    }
+
+    /// ⌃⌥C opens the menu from anywhere.
+    ///
+    /// Registration fails if another app already owns the combination; that is reported
+    /// rather than swallowed, since a silently dead shortcut is indistinguishable from a
+    /// broken app.
+    private func registerHotKey() {
+        NotificationCenter.default.addObserver(
+            forName: hotKeyFired, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.statusItem.button?.performClick(nil)
+        }
+
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                 eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), hotKeyCallback, 1, &spec, nil, nil)
+
+        // 'CPrm', an arbitrary but unique signature for this app's hotkeys.
+        let id = EventHotKeyID(signature: OSType(0x4350726D), id: 1)
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_C),
+                                         UInt32(controlKey | optionKey),
+                                         id,
+                                         GetApplicationEventTarget(),
+                                         0,
+                                         &hotKeyRef)
+        if status != noErr {
+            NSLog("claude-primer: could not register ⌃⌥C (error \(status)) — another app may own it")
         }
     }
 
@@ -369,6 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_: Notification) {
+        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
         usageTimer?.invalidate()
         watcher?.cancel()
         if watchedFD >= 0 { close(watchedFD) }
