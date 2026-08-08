@@ -31,6 +31,11 @@ pub struct Snapshot {
     pub units: Units,
     /// Severity is resolved here, once, so the Swift side never re-derives it and the
     /// two surfaces cannot disagree about what counts as a problem.
+    /// Real usage from Claude Code's own `/usage`, when it could be read. This is the
+    /// only authoritative field here — `window` above is inferred from this tool's own
+    /// primes and is wrong whenever something else opened a window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::Usage>,
     pub health: Health,
     pub paths: Paths,
 }
@@ -150,6 +155,16 @@ pub fn gather(cfg: &Config, now: DateTime<Local>) -> Result<Readout> {
 const RECENT_RUNS: usize = 3;
 
 pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
+    build_inner(cfg, now, false)
+}
+
+/// `with_usage` costs a ~0.5s subprocess, so callers that refresh on a timer leave it
+/// off and only pay it when a human is actually looking.
+pub fn build_with_usage(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
+    build_inner(cfg, now, true)
+}
+
+fn build_inner(cfg: &Config, now: DateTime<Local>, with_usage: bool) -> Result<Snapshot> {
     let snap = gather(cfg, now)?;
     let started_at = state::last_window_start()?;
 
@@ -210,6 +225,7 @@ pub fn build(cfg: &Config, now: DateTime<Local>) -> Result<Snapshot> {
         recent,
         upcoming,
         units: Units { agent, daemon },
+        usage: with_usage.then(|| crate::usage::fetch(&cfg.claude_bin)).flatten(),
         health,
         paths: Paths {
             config: Config::path()?.display().to_string(),
@@ -327,13 +343,15 @@ mod tests {
     }
 
     #[test]
-    fn this_module_never_invokes_claude() {
-        // Same guarantee as the status line: the menu bar polls this every 30s, so
-        // reaching the prime path here would open a window on every refresh.
+    fn this_module_never_opens_a_window() {
+        // The invariant is not "never run claude" — `/usage` is answered client-side at
+        // zero tokens and leaves the window untouched, which is why reading it here is
+        // safe. The invariant is that nothing on this path can *start* a window, since
+        // the menu bar polls it and would otherwise reset the very thing it displays.
         let full = include_str!("snapshot.rs");
         let impl_src = full.split("#[cfg(test)]").next().unwrap();
-        assert!(!impl_src.contains("claude_bin"), "must not read the claude binary path");
-        assert!(!impl_src.contains("crate::prime"), "must not reach the prime path");
+        assert!(!impl_src.contains("prime::run"), "must not reach the prime path");
+        assert!(!impl_src.contains("build_args"), "must not compose a priming call");
         assert!(!impl_src.contains("reqwest"), "must not use an HTTP client");
         assert!(!impl_src.contains("TcpStream"), "must not open a socket");
     }

@@ -4,6 +4,7 @@ mod pmset;
 mod prime;
 mod snapshot;
 mod state;
+mod usage;
 mod window;
 
 use anyhow::{anyhow, Context, Result};
@@ -47,7 +48,12 @@ enum Cmd {
     /// Print the path to the config file, for `code $(claude-primer config-path)`.
     ConfigPath,
     /// Print full state as JSON. The contract the menu bar app renders.
-    Snapshot,
+    Snapshot {
+        /// Also query Claude Code for real usage percentages and window reset times.
+        /// Costs no tokens but adds ~0.5s, so it is opt-in rather than on every poll.
+        #[arg(long)]
+        usage: bool,
+    },
     /// Manage the menu bar app's launch-at-login agent.
     Menubar {
         #[command(subcommand)]
@@ -107,7 +113,7 @@ fn real_main() -> Result<()> {
             println!("{}", Config::path()?.display());
             Ok(())
         }
-        Cmd::Snapshot => cmd_snapshot(),
+        Cmd::Snapshot { usage } => cmd_snapshot(usage),
         Cmd::Menubar { action } => cmd_menubar(action),
         Cmd::ArmWakes => cmd_arm_wakes(),
         Cmd::Uninstall => cmd_uninstall(),
@@ -378,9 +384,13 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-fn cmd_snapshot() -> Result<()> {
+fn cmd_snapshot(with_usage: bool) -> Result<()> {
     let cfg = Config::load()?;
-    let snap = snapshot::build(&cfg, Local::now())?;
+    let snap = if with_usage {
+        snapshot::build_with_usage(&cfg, Local::now())?
+    } else {
+        snapshot::build(&cfg, Local::now())?
+    };
     println!("{}", serde_json::to_string_pretty(&snap)?);
     Ok(())
 }

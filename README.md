@@ -42,6 +42,24 @@ claude-primer menubar enable     # optional, see "Menu bar app" below
 
 Other targets: `make cli`, `make menubar`, `make test`, `make uninstall`, `make clean`.
 
+### Requirements
+
+Rust, and Swift from the Command Line Tools (no full Xcode needed):
+
+```sh
+brew install rustup && rustup-init -y
+xcode-select --install     # if swiftc is missing
+```
+
+`make` locates `cargo` itself, including Homebrew's `rustup`, which installs its shims to
+`/opt/homebrew/opt/rustup/bin` and does **not** put them on `PATH`. So `make install` works
+even when typing `cargo` in your shell doesn't. If you want it on your PATH for interactive
+use too:
+
+```sh
+echo 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"' >> ~/.zshrc
+```
+
 `install` will:
 
 1. Resolve the absolute path to your `claude` binary (launchd jobs get a minimal `PATH`, so this must be absolute).

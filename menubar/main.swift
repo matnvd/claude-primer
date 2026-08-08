@@ -17,6 +17,7 @@ struct Snapshot: Decodable {
     let window: WindowState
     let nextPrime: Prime?
     let today: Today
+    let usage: UsageInfo?
     let recent: [RunSummary]
     let upcoming: [Prime]
     let units: Units
@@ -24,7 +25,7 @@ struct Snapshot: Decodable {
     let paths: Paths
 
     enum CodingKeys: String, CodingKey {
-        case window, today, recent, upcoming, units, health, paths
+        case window, today, usage, recent, upcoming, units, health, paths
         case nextPrime = "next_prime"
     }
 }
@@ -70,6 +71,22 @@ struct RunSummary: Decodable {
     enum CodingKeys: String, CodingKey {
         case ts, anchor, outcome, label
         case costUsd = "cost_usd"
+    }
+}
+
+/// Real usage from Claude Code's `/usage`. Absent unless the snapshot was taken with
+/// --usage, which the menu does only when opened.
+struct UsageInfo: Decodable {
+    let sessionPct: Int?
+    let sessionResetsAt: Date?
+    let weekPct: Int?
+    let weekResetsAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case sessionPct = "session_pct"
+        case sessionResetsAt = "session_resets_at"
+        case weekPct = "week_pct"
+        case weekResetsAt = "week_resets_at"
     }
 }
 
@@ -217,8 +234,9 @@ enum CLI {
         return String(data: data, encoding: .utf8)
     }
 
-    static func snapshot() -> Snapshot? {
-        guard let json = run(["snapshot"]), let data = json.data(using: .utf8) else { return nil }
+    static func snapshot(withUsage: Bool = false) -> Snapshot? {
+        let args = withUsage ? ["snapshot", "--usage"] : ["snapshot"]
+        guard let json = run(args), let data = json.data(using: .utf8) else { return nil }
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .custom { decoder in
             let s = try decoder.singleValueContainer().decode(String.self)
@@ -278,16 +296,26 @@ enum Fmt {
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var timer: Timer?
     private var watcher: DispatchSourceFileSystemObject?
     private var watchedFD: CInt = -1
     private var latest: Snapshot?
+    /// Last known real usage, kept so the menu can draw instantly instead of waiting on
+    /// a subprocess. Refreshed on a slow timer and again (asynchronously) on open.
+    private var cachedUsage: UsageInfo?
+    private var usageTimer: Timer?
+    /// The two rows the async fetch updates in place, so a late arrival doesn't have to
+    /// rebuild a menu the user is already reading.
+    private weak var sessionRow: NSMenuItem?
+    private weak var weekRow: NSMenuItem?
 
     func applicationDidFinishLaunching(_: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.menu = NSMenu()
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem.menu = menu
 
         refresh()
 
@@ -297,9 +325,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.refresh()
         }
         startWatchingRunsLog()
+
+        // Keep the cache warm so opening the menu is instant. Five minutes is plenty
+        // for a percentage that moves slowly, and it is 12 calls an hour rather than 120.
+        refreshUsage()
+        usageTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            self?.refreshUsage()
+        }
+    }
+
+    /// Fetch real usage off the main thread and cache it.
+    private func refreshUsage() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let u = CLI.snapshot(withUsage: true)?.usage
+            DispatchQueue.main.async {
+                guard let self, let u else { return }
+                self.cachedUsage = u
+                self.applyUsage(u)
+            }
+        }
+    }
+
+    /// Update the two usage rows in place. Safe while the menu is open.
+    private func applyUsage(_ u: UsageInfo) {
+        if let pct = u.sessionPct {
+            let resets = u.sessionResetsAt.map { "resets \(Fmt.hm($0))" } ?? ""
+            sessionRow?.title = "Session      \(pct)% used   \(resets)"
+        }
+        if let pct = u.weekPct {
+            let resets = u.weekResetsAt.map { "resets \(Fmt.dayAndTime($0))" } ?? ""
+            weekRow?.title = "This week    \(pct)% used   \(resets)"
+        }
     }
 
     func applicationWillTerminate(_: Notification) {
+        usageTimer?.invalidate()
         watcher?.cancel()
         if watchedFD >= 0 { close(watchedFD) }
     }
@@ -319,12 +379,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func render(_ snap: Snapshot?) {
-        guard let button = statusItem.button else { return }
+        guard let button = statusItem.button, let menu = statusItem.menu else { return }
 
         guard let snap else {
             button.image = Icon.unavailable
             button.title = " ?"
-            statusItem.menu = unavailableMenu()
+            fillUnavailable(menu)
             return
         }
 
@@ -333,13 +393,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // because a problem you have to open a menu to notice is a problem you miss.
         button.image = Icon.claude
         button.title = snap.health.prefix
-        statusItem.menu = buildMenu(snap)
+        fill(menu, snap)
+    }
+
+    // MARK: Opening
+
+    /// Fetch real usage only here. It costs no tokens but does spawn a subprocess and
+    /// take ~0.5s, so paying for it on the 30s poll would be 2,880 calls a day to show
+    /// a number nobody is looking at.
+    /// Draw immediately from cached state, then refresh in the background. Fetching
+    /// synchronously here blocked the menu from appearing for about a second, which is
+    /// a poor trade for a percentage that barely moves.
+    func menuWillOpen(_ menu: NSMenu) {
+        if let snap = CLI.snapshot() {
+            latest = snap
+            fill(menu, snap)
+        }
+        refreshUsage()
     }
 
     // MARK: Menus
 
-    private func unavailableMenu() -> NSMenu {
-        let m = NSMenu()
+    private func fillUnavailable(_ m: NSMenu) {
+        m.removeAllItems()
         m.addItem(disabled("claude-primer not responding"))
         m.addItem(disabled("expected at \(CLI.binary)"))
         m.addItem(.separator())
@@ -347,16 +423,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .target = self
         m.addItem(.separator())
         addQuit(to: m)
-        return m
     }
 
-    private func buildMenu(_ snap: Snapshot) -> NSMenu {
-        let m = NSMenu()
+    /// Repopulates the *existing* menu rather than building a new one. Assigning a new
+    /// NSMenu to the status item drops its delegate, which silently killed
+    /// `menuWillOpen` — and with it the on-open usage fetch — on the first refresh.
+    private func fill(_ m: NSMenu, _ snap: Snapshot) {
+        m.removeAllItems()
+
+        // Rows always exist so a late fetch can fill them without rebuilding the menu.
+        let session = disabled("Session      …")
+        let week = disabled("This week    …")
+        m.addItem(session)
+        m.addItem(week)
+        m.addItem(.separator())
+        sessionRow = session
+        weekRow = week
+        if let u = snap.usage ?? cachedUsage { applyUsage(u) }
 
         if let ends = snap.window.endsAt, snap.window.open {
-            m.addItem(disabled("Window ends  \(Fmt.hm(ends))"))
+            m.addItem(disabled("Est. window  ends \(Fmt.hm(ends))"))
         } else if let ends = snap.window.endsAt {
-            m.addItem(disabled("Window ended  \(Fmt.hm(ends))"))
+            m.addItem(disabled("Est. window  ended \(Fmt.hm(ends))"))
         } else {
             m.addItem(disabled("No window open"))
         }
@@ -400,7 +488,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         m.addItem(launch)
 
         addQuit(to: m)
-        return m
     }
 
     private func disabled(_ title: String) -> NSMenuItem {
