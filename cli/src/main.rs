@@ -152,7 +152,7 @@ fn cmd_install(token: Option<String>) -> Result<()> {
 
     // Reuse the installed token when one exists, so reinstalling to apply a schedule
     // change doesn't silently downgrade auth to the keychain.
-    let token = match token {
+    let token = match token.map(|t| sanitize_token(&t)) {
         Some(t) => Some(t),
         None => match launchd::existing_token() {
             Some(t) => {
@@ -496,6 +496,25 @@ fn resolve_claude_bin() -> Result<String> {
     Err(anyhow!("could not find the `claude` binary — set claude_bin in config.toml"))
 }
 
+/// Strip every whitespace character from a pasted token.
+///
+/// These tokens are long enough to wrap in a terminal, and copying a wrapped line
+/// captures the break as a real newline — sometimes with leading indentation. `trim`
+/// misses that entirely, because the whitespace lands in the *middle*. The result is a
+/// credential that looks the right length and fails every request with a 401 that
+/// blames expiry. Tokens are base64url-ish, so no legitimate whitespace exists to lose.
+fn sanitize_token(raw: &str) -> String {
+    let clean: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    if clean.len() != raw.len() {
+        eprintln!(
+            "note: removed {} whitespace character(s) from the token — it was probably \
+             copied across a line wrap.",
+            raw.len() - clean.len()
+        );
+    }
+    clean
+}
+
 fn prompt_token() -> Result<Option<String>> {
     use std::io::Write;
     println!("\nA long-lived token from `claude setup-token` lets a prime run even when");
@@ -505,8 +524,32 @@ fn prompt_token() -> Result<Option<String>> {
     std::io::stdout().flush()?;
     let mut s = String::new();
     std::io::stdin().read_line(&mut s)?;
-    let s = s.trim().to_string();
+    let s = sanitize_token(&s);
     Ok((!s.is_empty()).then_some(s))
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_token_wrapped_across_lines_is_repaired() {
+        // The failure this prevents: copying a long token out of a terminal captures
+        // the line wrap as a real newline, sometimes with indentation. It lands in the
+        // *middle*, so trim() misses it, the length still looks plausible, and every
+        // request 401s citing expiry — pointing the blame at the wrong thing entirely.
+        assert_eq!(sanitize_token("sk-ant-oat01-AA\n BB"), "sk-ant-oat01-AABB");
+        assert_eq!(sanitize_token("  sk-ant-x  \n"), "sk-ant-x");
+        assert_eq!(sanitize_token("sk-ant-clean"), "sk-ant-clean");
+    }
+
+    #[test]
+    fn an_auth_failure_is_told_apart_from_other_errors() {
+        assert!(looks_like_auth_failure("API Error: 401 OAuth access token has expired."));
+        assert!(looks_like_auth_failure("Failed to authenticate."));
+        assert!(!looks_like_auth_failure("API Error: 529 overloaded"));
+        assert!(!looks_like_auth_failure("could not execute /usr/bin/claude"));
+    }
+}
