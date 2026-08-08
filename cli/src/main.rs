@@ -359,6 +359,21 @@ fn cmd_status() -> Result<()> {
             late,
             cost
         );
+        // Without this the reason lived only in runs.jsonl, so an expired token — the
+        // most actionable failure there is — showed up here as a bare "error".
+        if let Some(e) = &r.error {
+            println!("      {}", truncate_line(e, 100));
+        }
+    }
+
+    if let Some(bad) = runs.iter().rev().find(|r| r.outcome == state::Outcome::Error) {
+        if looks_like_auth_failure(bad.error.as_deref().unwrap_or("")) {
+            println!("\n  ⚠  the stored token is not being accepted");
+            println!("     Primes will keep failing until it is replaced. `install` reuses the");
+            println!("     token already stored, so --token is required to change it:");
+            println!("\n       claude setup-token");
+            println!("       claude-primer install --token 'sk-ant-…'");
+        }
     }
     Ok(())
 }
@@ -440,6 +455,25 @@ fn cmd_uninstall() -> Result<()> {
 
     println!("config and logs retained");
     Ok(())
+}
+
+/// Whether a prime's error text is the credential being rejected, rather than a
+/// transient API problem. Worth singling out because the fix is specific and the
+/// failure repeats silently on every anchor until it is applied.
+fn looks_like_auth_failure(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    e.contains("401")
+        || e.contains("oauth")
+        || e.contains("authenticate")
+        || e.contains("token has expired")
+}
+
+fn truncate_line(s: &str, max: usize) -> String {
+    let one = s.replace('\n', " ");
+    if one.chars().count() <= max {
+        return one;
+    }
+    one.chars().take(max).collect::<String>() + "…"
 }
 
 fn resolve_claude_bin() -> Result<String> {
