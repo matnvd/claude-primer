@@ -68,6 +68,16 @@ struct RunSummary: Decodable {
     let label: String
     let costUsd: Double?
 
+    /// This run's own outcome, not the day's health — a single prime can have failed on
+    /// a day that is otherwise fine, and vice versa.
+    var marker: String {
+        switch outcome {
+        case "ok": return "✓"
+        case "error": return "✗"
+        default: return "⚠"   // wasted, missed_too_stale
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
         case ts, anchor, outcome, label
         case costUsd = "cost_usd"
@@ -348,13 +358,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Update the two usage rows in place. Safe while the menu is open.
     private func applyUsage(_ u: UsageInfo) {
-        if let pct = u.sessionPct {
+        if let pct = u.sessionPct, let r = sessionRow {
             let resets = u.sessionResetsAt.map { "resets \(Fmt.hm($0))" } ?? ""
-            sessionRow?.title = "Session      \(pct)% used   \(resets)"
+            r.attributedTitle = row("Session", "\(pct)%", resets).attributedTitle
         }
-        if let pct = u.weekPct {
+        if let pct = u.weekPct, let r = weekRow {
             let resets = u.weekResetsAt.map { "resets \(Fmt.dayAndTime($0))" } ?? ""
-            weekRow?.title = "This week    \(pct)% used   \(resets)"
+            r.attributedTitle = row("This week", "\(pct)%", resets).attributedTitle
         }
     }
 
@@ -432,8 +442,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         m.removeAllItems()
 
         // Rows always exist so a late fetch can fill them without rebuilding the menu.
-        let session = disabled("Session      …")
-        let week = disabled("This week    …")
+        let session = row("Session", "…", "")
+        let week = row("This week", "…", "")
         m.addItem(session)
         m.addItem(week)
         m.addItem(.separator())
@@ -441,36 +451,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         weekRow = week
         if let u = snap.usage ?? cachedUsage { applyUsage(u) }
 
-        if let ends = snap.window.endsAt, snap.window.open {
-            m.addItem(disabled("Est. window  ends \(Fmt.hm(ends))"))
-        } else if let ends = snap.window.endsAt {
-            m.addItem(disabled("Est. window  ended \(Fmt.hm(ends))"))
+        // The most recent prime, with its own outcome marker. This replaced the
+        // estimated-window row: that estimate is inferred from this tool's own primes
+        // and is simply wrong whenever a window was opened elsewhere, so showing it
+        // beneath the real numbers above invited comparing a fact with a guess.
+        if let last = snap.recent.last {
+            m.addItem(row("Last prime", Fmt.dayAndTime(last.ts), last.marker))
         } else {
-            m.addItem(disabled("No window open"))
+            m.addItem(row("Last prime", "none yet", "—"))
         }
 
         if let next = snap.nextPrime {
-            m.addItem(disabled("Next prime   \(Fmt.dayAndTime(next.at))"))
+            m.addItem(row("Next prime", Fmt.dayAndTime(next.at), ""))
         }
 
         if snap.today.scheduled {
             let mark = snap.health == .ok ? "✓" : (snap.health == .warn ? "⚠" : "✗")
-            m.addItem(disabled("Today        \(mark) \(snap.today.done)/\(snap.today.expected)"))
+            m.addItem(row("Today", "\(snap.today.done)/\(snap.today.expected)", mark))
         } else {
-            m.addItem(disabled("Today        — not scheduled"))
+            m.addItem(row("Today", "not scheduled", "—"))
         }
 
         if !snap.units.agent.loaded {
             m.addItem(disabled("⚠︎ agent not loaded — run: claude-primer install"))
-        }
-
-        // The last few runs whenever they happened, so the list isn't empty just after
-        // midnight. Dry-runs are already filtered out by the CLI.
-        if !snap.recent.isEmpty {
-            m.addItem(.separator())
-            for r in snap.recent {
-                m.addItem(disabled("\(Fmt.stamp(r.ts))  \(r.anchor)  \(r.label)"))
-            }
         }
 
         m.addItem(.separator())
@@ -488,6 +491,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         m.addItem(launch)
 
         addQuit(to: m)
+    }
+
+    /// A three-column row.
+    ///
+    /// Menus render in a proportional font, so padding with spaces does not line
+    /// anything up. Real tab stops do, and `monospacedDigitSystemFont` keeps the digits
+    /// themselves the same width — so 51% and 68%, or 17:29 and 05:59, sit in true
+    /// columns while the labels stay in the system face rather than looking like a
+    /// terminal.
+    private func row(_ label: String, _ mid: String, _ right: String) -> NSMenuItem {
+        let style = NSMutableParagraphStyle()
+        style.tabStops = [
+            NSTextTab(textAlignment: .left, location: 92),
+            NSTextTab(textAlignment: .left, location: 168),
+        ]
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.attributedTitle = NSAttributedString(
+            string: "\(label)\t\(mid)\t\(right)",
+            attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+                .paragraphStyle: style,
+            ]
+        )
+        item.isEnabled = false
+        return item
     }
 
     private func disabled(_ title: String) -> NSMenuItem {
