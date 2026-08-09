@@ -57,18 +57,33 @@ pub fn build_args(cfg: &Config) -> Vec<String> {
     ]
 }
 
-/// Prompt caching is counterproductive for a prime. Primes are 5 hours apart, so a
-/// cache entry (1-hour TTL) is always cold, and every run paid the cache-*write*
-/// premium for nothing. Disabling it removed the entire cache_creation charge.
-pub fn build_env() -> Vec<(&'static str, &'static str)> {
+/// Environment for any `claude` invocation.
+///
+/// Prompt caching is counterproductive for a prime: primes are 5 hours apart, so a cache
+/// entry (1-hour TTL) is always cold and every run paid the cache-*write* premium for
+/// nothing. Disabling it removed the cache_creation charge entirely.
+///
+/// `PATH` is here because `claude` is a Node wrapper and needs `node` on the path.
+/// launchd hands its jobs only `/usr/bin:/bin:/usr/sbin:/sbin`, so anything spawned from
+/// a launchd-started process — the menu bar app included — otherwise fails to find it.
+/// Setting it here rather than only in a plist means every caller is covered, however it
+/// was started.
+pub fn build_env() -> Vec<(String, String)> {
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    let path = format!("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:{inherited}");
     vec![
-        ("CLAUDE_CODE_DISABLE_PROMPT_CACHING", "1"),
-        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+        ("CLAUDE_CODE_DISABLE_PROMPT_CACHING".into(), "1".into()),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into()),
+        ("PATH".into(), path),
     ]
 }
 
 pub fn render_command(cfg: &Config) -> String {
-    let mut parts: Vec<String> = build_env().iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let mut parts: Vec<String> = build_env()
+        .iter()
+        .filter(|(k, _)| k != "PATH")
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
     parts.push("/usr/bin/caffeinate".into());
     parts.push("-i".into());
     parts.push(shell_quote(&cfg.claude_bin));
@@ -525,6 +540,16 @@ mod tests {
         let c = cfg();
         let now = at(10, 30);
         assert_eq!(boundary_wait(&c, now, now - chrono::Duration::seconds(1), Anchor::parse("10:30").ok(), false), None);
+    }
+
+    #[test]
+    fn the_environment_carries_a_usable_path() {
+        // launchd gives its jobs a minimal PATH with no node on it, so a `claude` spawned
+        // from the menu bar app silently failed and usage came back empty.
+        let env = build_env();
+        let path = env.iter().find(|(k, _)| k == "PATH").expect("PATH must be set").1.clone();
+        assert!(path.contains("/opt/homebrew/bin"), "homebrew node must be reachable");
+        assert!(path.contains("/usr/local/bin"), "and the other common prefix");
     }
 
     #[test]
