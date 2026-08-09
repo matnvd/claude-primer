@@ -6,8 +6,23 @@ use std::process::Command;
 
 const PMSET: &str = "/usr/bin/pmset";
 
-/// Wake this far ahead of the anchor so the machine is fully up before launchd fires.
-const WAKE_LEAD: i64 = 2;
+/// Wake exactly *at* the anchor, not before it.
+///
+/// This was 2 minutes, on the reasoning that the machine should be fully up before
+/// launchd fires. The power log showed that reasoning is backwards. A scheduled wake
+/// with nothing to do is a DarkWake, and macOS returns it to sleep in about five
+/// seconds:
+///
+/// ```text
+/// 09:28:00  DarkWake from Deep Idle …        5 secs
+/// 09:28:05  Entering Sleep state 'Maintenance Sleep'
+/// ```
+///
+/// So the lead woke the Mac, achieved nothing, and let it sleep again before the 09:30
+/// anchor — which then only fired at 09:42 when the lid opened. Waking on the anchor
+/// means launchd has work ready the moment the system is up, and the prime itself holds
+/// the machine awake (see `prime`'s use of `caffeinate`).
+const WAKE_LEAD: i64 = 0;
 
 /// How many days of one-time wakes to keep armed. The daemon re-arms daily, so this
 /// is a safety horizon rather than a schedule.
@@ -72,9 +87,7 @@ pub fn arm(cfg: &Config) -> Result<WakeLedger> {
     let mode = cfg.mode()?;
     let (h, m, _) = earliest.local_hm(cfg.today()?, mode)?;
 
-    // Apply the same lead as the one-time events. Without it the repeating wake fired
-    // at the anchor time exactly — the same instant launchd started the job, leaving no
-    // margin for the machine to finish waking.
+    // Same treatment as the one-time events below.
     let (lead_h, lead_m, day_shift) = shift_back(h, m, WAKE_LEAD);
     let time_local = format!("{lead_h:02}:{lead_m:02}:00");
     let weekdays: String = repeat_days

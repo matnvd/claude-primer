@@ -69,6 +69,8 @@ pub fn build_env() -> Vec<(&'static str, &'static str)> {
 
 pub fn render_command(cfg: &Config) -> String {
     let mut parts: Vec<String> = build_env().iter().map(|(k, v)| format!("{k}={v}")).collect();
+    parts.push("/usr/bin/caffeinate".into());
+    parts.push("-i".into());
     parts.push(shell_quote(&cfg.claude_bin));
     parts.extend(build_args(cfg).iter().map(|a| shell_quote(a)));
     parts.join(" ")
@@ -252,8 +254,17 @@ pub fn run(cfg: &Config, args: PrimeArgs) -> Result<Outcome> {
     // have. Taken here, before spawning, it errs a shade early instead.
     let call_started_at = Local::now();
     let started = std::time::Instant::now();
-    let out = Command::new(&cfg.claude_bin)
-        .args(build_args(cfg))
+
+    // Run under `caffeinate -i` so the system cannot idle-sleep mid-prime.
+    //
+    // This matters most in exactly the case the tool exists for: the anchor fires during
+    // a scheduled wake, which is a DarkWake macOS will end within seconds unless
+    // something holds it open. Without the assertion the machine can sleep with the
+    // request in flight, and the prime is lost.
+    let mut argv: Vec<String> = vec!["-i".into(), cfg.claude_bin.clone()];
+    argv.extend(build_args(cfg));
+    let out = Command::new("/usr/bin/caffeinate")
+        .args(&argv)
         .envs(build_env())
         .current_dir(&cwd)
         .output()
@@ -517,13 +528,24 @@ mod tests {
     }
 
     #[test]
+    fn the_prime_holds_the_machine_awake() {
+        // A scheduled wake is a DarkWake that macOS ends within seconds unless something
+        // holds it. Without this the system can sleep with the request in flight, which
+        // is precisely the case the whole tool exists to serve.
+        let src = include_str!("prime.rs");
+        let impl_src = src.split("#[cfg(test)]").next().unwrap();
+        assert!(impl_src.contains("caffeinate"), "the prime must run under caffeinate");
+        assert!(render_command(&cfg()).contains("caffeinate"), "and it must be visible in --dry-run");
+    }
+
+    #[test]
     fn the_window_timestamp_is_taken_before_the_call() {
         // `ts` is the origin every countdown is measured from. Stamping it after the
         // call would silently add the call's 2-11s to every window the tool reports.
         let src = include_str!("prime.rs");
         let impl_src = src.split("#[cfg(test)]").next().unwrap();
         let stamped = impl_src.find("let call_started_at").expect("timestamp must be captured");
-        let spawned = impl_src.find("Command::new(&cfg.claude_bin)").expect("call must exist");
+        let spawned = impl_src.find(r#"Command::new("/usr/bin/caffeinate")"#).expect("call must exist");
         assert!(stamped < spawned, "the window timestamp must be taken before the call");
         assert!(impl_src.contains("rec.ts = call_started_at"), "and it must be the one recorded");
     }
