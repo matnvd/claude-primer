@@ -396,20 +396,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var usageFetchedAt: Date?
 
-    /// Fetch real usage off the main thread and cache it.
-    private func refreshUsage() {
-        if let at = usageFetchedAt, Date().timeIntervalSince(at) < Self.usageMaxAge { return }
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let u = CLI.snapshot(withUsage: true)?.usage
-            DispatchQueue.main.async {
-                guard let self, let u else { return }
-                self.cachedUsage = u
-                self.usageFetchedAt = Date()
-                self.applyUsage(u)
-            }
-        }
-    }
-
     /// Update the two usage rows in place. Safe while the menu is open.
     private func applyUsage(_ u: UsageInfo) {
         if let pct = u.sessionPct, let r = sessionRow {
@@ -469,11 +455,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// synchronously here blocked the menu from appearing for about a second, which is
     /// a poor trade for a percentage that barely moves.
     func menuWillOpen(_ menu: NSMenu) {
-        if let snap = CLI.snapshot() {
-            latest = snap
-            fill(menu, snap)
+        // Fetch *before* drawing when the reading is stale. Doing it asynchronously and
+        // patching the rows afterwards left the menu showing "…" whenever the update
+        // landed after it had drawn — a menu that never resolves is worse than one that
+        // takes a second. The cache means only the first open in two minutes pays it.
+        let stale = usageFetchedAt.map { Date().timeIntervalSince($0) >= Self.usageMaxAge } ?? true
+        guard let snap = CLI.snapshot(withUsage: stale) else { return }
+        if let u = snap.usage {
+            cachedUsage = u
+            usageFetchedAt = Date()
         }
-        refreshUsage()
+        latest = snap
+        fill(menu, snap)
     }
 
     // MARK: Menus

@@ -37,7 +37,21 @@ impl Usage {
 
 /// Ask Claude Code for the current usage. `None` on any failure, so a status surface
 /// keeps working when the format changes or the binary is unreachable.
+///
+/// Retries once. This call occasionally comes back with a session cost summary instead
+/// of the subscription panel — most likely when two `claude` invocations overlap — and
+/// it recovered on retry every time it was observed. The call spends nothing and opens
+/// no window, so a second attempt is free; showing no numbers because of a transient
+/// collision is not.
 pub fn fetch(claude_bin: &str) -> Option<Usage> {
+    if let Some(u) = fetch_once(claude_bin) {
+        return Some(u);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    fetch_once(claude_bin)
+}
+
+fn fetch_once(claude_bin: &str) -> Option<Usage> {
     // Pin the working directory, exactly as a prime does. Without it this inherits the
     // caller's cwd — which for the menu bar app is `/` — and Claude Code then runs its
     // auto-discovery for hooks, plugins, MCP servers and CLAUDE.md from the filesystem
@@ -208,7 +222,8 @@ mod tests {
         // refresh of the menu bar.
         let full = include_str!("usage.rs");
         let impl_src = full.split("#[cfg(test)]").next().unwrap();
-        let call = impl_src.split("fn fetch").nth(1).unwrap().split("fn ").next().unwrap();
+        // fetch() is now a retry wrapper; fetch_once() is what actually spawns claude.
+        let call = impl_src.split("fn fetch_once").nth(1).unwrap();
         assert!(call.contains(r#""/usage""#), "the only prompt may be /usage");
         assert!(!call.contains("build_args"), "must not compose a priming call");
         assert!(!call.contains("prime::run"), "must not reach the prime path");
