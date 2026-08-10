@@ -392,7 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// meant ~288 authentications a day and appeared to invalidate the extension's
     /// session, forcing repeated re-verification. It is now fetched only when the menu
     /// is opened, and not even then if a recent reading is still on hand.
-    private static let usageMaxAge: TimeInterval = 120
+    private static let usageMaxAge: TimeInterval = 600
 
     private var usageFetchedAt: Date?
 
@@ -455,18 +455,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// synchronously here blocked the menu from appearing for about a second, which is
     /// a poor trade for a percentage that barely moves.
     func menuWillOpen(_ menu: NSMenu) {
-        // Fetch *before* drawing when the reading is stale. Doing it asynchronously and
-        // patching the rows afterwards left the menu showing "…" whenever the update
-        // landed after it had drawn — a menu that never resolves is worse than one that
-        // takes a second. The cache means only the first open in two minutes pays it.
-        let stale = usageFetchedAt.map { Date().timeIntervalSince($0) >= Self.usageMaxAge } ?? true
-        guard let snap = CLI.snapshot(withUsage: stale) else { return }
-        if let u = snap.usage {
-            cachedUsage = u
-            usageFetchedAt = Date()
-        }
+        // Draw from the CLI's on-disk cache, which is instant and spawns nothing. The
+        // menu never blocks, and nothing here authenticates.
+        guard let snap = CLI.snapshot() else { return }
         latest = snap
+        if let u = snap.usage { cachedUsage = u }
         fill(menu, snap)
+
+        // Refresh in the background when the cached reading is old, so the *next* open
+        // is current. Rate-limited on this side too: each refresh runs `claude`, and
+        // doing that on every open is what made the menu slow.
+        let stale = usageFetchedAt.map { Date().timeIntervalSince($0) >= Self.usageMaxAge } ?? true
+        guard stale else { return }
+        usageFetchedAt = Date()
+        DispatchQueue.global(qos: .utility).async {
+            _ = CLI.snapshot(withUsage: true)   // writes the CLI's cache for next time
+        }
     }
 
     // MARK: Menus

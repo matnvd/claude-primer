@@ -225,7 +225,14 @@ fn build_inner(cfg: &Config, now: DateTime<Local>, with_usage: bool) -> Result<S
         recent,
         upcoming,
         units: Units { agent, daemon },
-        usage: with_usage.then(|| crate::usage::fetch(&cfg.claude_bin)).flatten(),
+        // A live fetch when asked for; otherwise the last cached reading, which costs
+        // nothing and authenticates nothing. That lets the menu draw real numbers
+        // instantly and refresh in the background.
+        usage: if with_usage {
+            crate::usage::fetch(&cfg.claude_bin).or_else(crate::usage::cached)
+        } else {
+            crate::usage::cached()
+        },
         health,
         paths: Paths {
             config: Config::path()?.display().to_string(),

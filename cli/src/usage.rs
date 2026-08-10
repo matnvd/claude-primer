@@ -14,14 +14,17 @@
 //! stable contract. Parsing is therefore deliberately forgiving, and every failure
 //! degrades to `None` so callers fall back to the estimate rather than breaking.
 
-use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, TimeZone};
-use serde::Serialize;
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
+use serde::{Deserialize, Serialize};
 use std::process::Command;
+
+/// How long a cached reading stays usable.
+const CACHE_MAX_AGE_MINS: i64 = 15;
 
 /// What `/usage` reports. Percentages are of the plan's allowance, server-side, and
 /// include usage from every device — unlike the "what's contributing" breakdown further
 /// down that output, which is explicitly local-only.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     pub session_pct: Option<u8>,
     pub session_resets_at: Option<DateTime<Local>>,
@@ -44,11 +47,39 @@ impl Usage {
 /// no window, so a second attempt is free; showing no numbers because of a transient
 /// collision is not.
 pub fn fetch(claude_bin: &str) -> Option<Usage> {
-    if let Some(u) = fetch_once(claude_bin) {
-        return Some(u);
-    }
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    fetch_once(claude_bin)
+    let u = fetch_once(claude_bin).or_else(|| {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        fetch_once(claude_bin)
+    })?;
+    let _ = write_cache(&u);
+    Some(u)
+}
+
+#[derive(Serialize, Deserialize)]
+struct Cached {
+    fetched_at: DateTime<Local>,
+    usage: Usage,
+}
+
+fn cache_path() -> Option<std::path::PathBuf> {
+    Some(crate::config::data_dir().ok()?.join("usage.json"))
+}
+
+fn write_cache(u: &Usage) -> Option<()> {
+    let p = cache_path()?;
+    std::fs::create_dir_all(p.parent()?).ok()?;
+    let c = Cached { fetched_at: Local::now(), usage: u.clone() };
+    std::fs::write(p, serde_json::to_string_pretty(&c).ok()?).ok()
+}
+
+/// The last reading, if it is recent enough to still be meaningful.
+///
+/// Reading this costs nothing and authenticates nothing, which is the point: a status
+/// surface can show real numbers without spawning `claude` at all.
+pub fn cached() -> Option<Usage> {
+    let raw = std::fs::read_to_string(cache_path()?).ok()?;
+    let c: Cached = serde_json::from_str(&raw).ok()?;
+    (Local::now() - c.fetched_at < Duration::minutes(CACHE_MAX_AGE_MINS)).then_some(c.usage)
 }
 
 fn fetch_once(claude_bin: &str) -> Option<Usage> {
@@ -74,6 +105,16 @@ fn fetch_once(claude_bin: &str) -> Option<Usage> {
         ])
         // Same suppression the primes use: no telemetry, no cache writes.
         .envs(crate::prime::build_env())
+        // Deliberately NOT authenticated with CLAUDE_CODE_OAUTH_TOKEN.
+        //
+        // A token-authenticated session is not treated as a subscription session, so
+        // `/usage` answers with a session cost summary instead of the subscription
+        // panel — no percentages, no reset times. Reading real usage therefore requires
+        // the login keychain, and there is no configuration that avoids that.
+        //
+        // The cost of using the keychain is that each reading can invalidate the Claude
+        // Code VS Code extension's session. That trade is unavoidable, which is why this
+        // is read as rarely as possible and cached to disk.
         .current_dir(&cwd)
         .output()
         .ok()?;
