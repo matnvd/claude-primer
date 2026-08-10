@@ -332,7 +332,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Last known real usage, kept so the menu can draw instantly instead of waiting on
     /// a subprocess. Refreshed on a slow timer and again (asynchronously) on open.
     private var cachedUsage: UsageInfo?
-    private var usageTimer: Timer?
     /// The two rows the async fetch updates in place, so a late arrival doesn't have to
     /// rebuild a menu the user is already reading.
     private weak var sessionRow: NSMenuItem?
@@ -355,13 +354,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startWatchingRunsLog()
 
         registerHotKey()
-
-        // Keep the cache warm so opening the menu is instant. Five minutes is plenty
-        // for a percentage that moves slowly, and it is 12 calls an hour rather than 120.
-        refreshUsage()
-        usageTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            self?.refreshUsage()
-        }
     }
 
     /// ⌃⌥C opens the menu from anywhere.
@@ -393,13 +385,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// How long a usage reading stays good enough to reuse.
+    ///
+    /// Every fetch runs `claude`, which authenticates against the login keychain — the
+    /// same credential the Claude Code VS Code extension holds. Doing that on a timer
+    /// meant ~288 authentications a day and appeared to invalidate the extension's
+    /// session, forcing repeated re-verification. It is now fetched only when the menu
+    /// is opened, and not even then if a recent reading is still on hand.
+    private static let usageMaxAge: TimeInterval = 120
+
+    private var usageFetchedAt: Date?
+
     /// Fetch real usage off the main thread and cache it.
     private func refreshUsage() {
+        if let at = usageFetchedAt, Date().timeIntervalSince(at) < Self.usageMaxAge { return }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let u = CLI.snapshot(withUsage: true)?.usage
             DispatchQueue.main.async {
                 guard let self, let u else { return }
                 self.cachedUsage = u
+                self.usageFetchedAt = Date()
                 self.applyUsage(u)
             }
         }
@@ -419,7 +424,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_: Notification) {
         if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
-        usageTimer?.invalidate()
         watcher?.cancel()
         if watchedFD >= 0 { close(watchedFD) }
     }
