@@ -198,10 +198,7 @@ Open it by clicking the mark, or with **⌃⌥C** from anywhere.
 
 ```
 ┌──────────────────────────────────────┐
-│ Session      51%         resets 17:29│
-│ This week    68%         resets Mon …│
-│ ──────────────────────────────────── │
-│ Last prime   Sat 13:30   ✗           │
+│ Last prime   Mon 15:30   ✓           │
 │ Next prime   Sat 18:30               │
 │ Today        0/3         ⚠           │
 │ ──────────────────────────────────── │
@@ -215,7 +212,7 @@ Open it by clicking the mark, or with **⌃⌥C** from anywhere.
 └──────────────────────────────────────┘
 ```
 
-The top two rows are **real**, read from Claude Code itself — see [Real usage](#real-usage) below. Everything under the divider is this tool's own record.
+The app reads local files only — it never spawns `claude`, so opening the menu costs nothing and authenticates nothing. See [Why there are no usage percentages](#why-there-are-no-usage-percentages).
 
 Markers are per-row: `Last prime` shows that prime's outcome (`✓` ok, `✗` error, `⚠` wasted or missed), while `Today` shows the day overall. They can differ — one failure on an otherwise fine day, or a clean last prime after an earlier miss.
 
@@ -223,30 +220,32 @@ In the menu bar itself you see **just the mark** when everything is fine. A `⚠
 
 **"Prime now…" asks for confirmation.** It's the only action here that spends anything: it starts a 5-hour window beginning immediately, which shifts the rest of the day's schedule.
 
-### Real usage
+### Why there are no usage percentages
 
-`claude-primer snapshot --usage` asks Claude Code for the actual numbers:
+Claude Code can report your real session and weekly usage, and `claude-primer` can read it:
 
 ```sh
 claude-primer snapshot --usage | jq .usage
 ```
 
 ```json
-{
-  "session_pct": 51,
-  "session_resets_at": "2026-08-08T17:29:00-03:00",
-  "week_pct": 68,
-  "week_resets_at": "2026-08-10T05:59:00-03:00"
-}
+{ "session_pct": 51, "session_resets_at": "…", "week_pct": 68, "week_resets_at": "…" }
 ```
 
-**This costs nothing.** It runs `claude -p "/usage"`, which Claude Code answers client-side: measured at `total_cost_usd: 0`, zero tokens, and repeated calls leave the window's reset time unchanged. It does not open a window, which is what makes it safe to poll at all.
+It costs nothing — `total_cost_usd: 0`, zero tokens, and it does not open a window.
 
-Why this matters more than it sounds: everything else the tool reports about your window is **inferred from its own primes**, and is simply wrong whenever a window was opened somewhere it can't see — claude.ai, another machine, an interactive session. These two rows are the only authoritative numbers in the app.
+**But the menu bar app deliberately does not use it.** Those numbers come from `/usage`, which
+only answers with them when authenticated through the **login keychain**. A token-authenticated
+session isn't treated as a subscription session, so it returns a session cost summary instead —
+no percentages, no reset times. There is no flag or token that avoids this.
 
-The app fetches them on a **5-minute background timer** and again when you open the menu, both off the main thread. Opening is instant; a late result updates the two rows in place. The 30-second poll behind the icon is unaffected — it reads local files only and never contacts Anthropic.
+That keychain is the same credential the Claude Code VS Code extension holds. Reading it
+repeatedly invalidated that session and forced constant re-verification. Caching reduces how
+often it happens; it cannot eliminate it, because the cache has to be filled somehow.
 
-The numbers are parsed out of human-readable prose rather than a stable JSON contract, so any parse failure degrades to omitting the rows rather than showing a confidently wrong figure.
+So the trade is: **real usage in a menu, or a stable editor login.** The app takes the login.
+Run `snapshot --usage` by hand, or `/usage` inside Claude Code, when you actually want the
+numbers — both are on-demand and neither runs on a timer.
 
 ### It is not load-bearing
 

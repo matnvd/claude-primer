@@ -250,9 +250,8 @@ enum CLI {
         return String(data: data, encoding: .utf8)
     }
 
-    static func snapshot(withUsage: Bool = false) -> Snapshot? {
-        let args = withUsage ? ["snapshot", "--usage"] : ["snapshot"]
-        guard let json = run(args), let data = json.data(using: .utf8) else { return nil }
+    static func snapshot() -> Snapshot? {
+        guard let json = run(["snapshot"]), let data = json.data(using: .utf8) else { return nil }
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .custom { decoder in
             let s = try decoder.singleValueContainer().decode(String.self)
@@ -329,13 +328,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var watcher: DispatchSourceFileSystemObject?
     private var watchedFD: CInt = -1
     private var latest: Snapshot?
-    /// Last known real usage, kept so the menu can draw instantly instead of waiting on
-    /// a subprocess. Refreshed on a slow timer and again (asynchronously) on open.
-    private var cachedUsage: UsageInfo?
-    /// The two rows the async fetch updates in place, so a late arrival doesn't have to
-    /// rebuild a menu the user is already reading.
-    private weak var sessionRow: NSMenuItem?
-    private weak var weekRow: NSMenuItem?
     private var hotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_: Notification) {
@@ -382,29 +374,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                          &hotKeyRef)
         if status != noErr {
             NSLog("claude-primer: could not register ⌃⌥C (error \(status)) — another app may own it")
-        }
-    }
-
-    /// How long a usage reading stays good enough to reuse.
-    ///
-    /// Every fetch runs `claude`, which authenticates against the login keychain — the
-    /// same credential the Claude Code VS Code extension holds. Doing that on a timer
-    /// meant ~288 authentications a day and appeared to invalidate the extension's
-    /// session, forcing repeated re-verification. It is now fetched only when the menu
-    /// is opened, and not even then if a recent reading is still on hand.
-    private static let usageMaxAge: TimeInterval = 600
-
-    private var usageFetchedAt: Date?
-
-    /// Update the two usage rows in place. Safe while the menu is open.
-    private func applyUsage(_ u: UsageInfo) {
-        if let pct = u.sessionPct, let r = sessionRow {
-            let resets = u.sessionResetsAt.map { "resets \(Fmt.hm($0))" } ?? ""
-            r.attributedTitle = row("Session", "\(pct)%", resets).attributedTitle
-        }
-        if let pct = u.weekPct, let r = weekRow {
-            let resets = u.weekResetsAt.map { "resets \(Fmt.dayAndTime($0))" } ?? ""
-            r.attributedTitle = row("This week", "\(pct)%", resets).attributedTitle
         }
     }
 
@@ -455,22 +424,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// synchronously here blocked the menu from appearing for about a second, which is
     /// a poor trade for a percentage that barely moves.
     func menuWillOpen(_ menu: NSMenu) {
-        // Draw from the CLI's on-disk cache, which is instant and spawns nothing. The
-        // menu never blocks, and nothing here authenticates.
+        // Reads local files only. Nothing here spawns `claude`, so nothing here
+        // authenticates — see the note on usage rows in `fill`.
         guard let snap = CLI.snapshot() else { return }
         latest = snap
-        if let u = snap.usage { cachedUsage = u }
         fill(menu, snap)
-
-        // Refresh in the background when the cached reading is old, so the *next* open
-        // is current. Rate-limited on this side too: each refresh runs `claude`, and
-        // doing that on every open is what made the menu slow.
-        let stale = usageFetchedAt.map { Date().timeIntervalSince($0) >= Self.usageMaxAge } ?? true
-        guard stale else { return }
-        usageFetchedAt = Date()
-        DispatchQueue.global(qos: .utility).async {
-            _ = CLI.snapshot(withUsage: true)   // writes the CLI's cache for next time
-        }
     }
 
     // MARK: Menus
@@ -492,15 +450,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func fill(_ m: NSMenu, _ snap: Snapshot) {
         m.removeAllItems()
 
-        // Rows always exist so a late fetch can fill them without rebuilding the menu.
-        let session = row("Session", "…", "")
-        let week = row("This week", "…", "")
-        m.addItem(session)
-        m.addItem(week)
-        m.addItem(.separator())
-        sessionRow = session
-        weekRow = week
-        if let u = snap.usage ?? cachedUsage { applyUsage(u) }
+        // No usage rows, deliberately.
+        //
+        // Real percentages come from `/usage`, which only answers with them when
+        // authenticated via the login *keychain* — a token-authenticated session gets a
+        // cost summary instead. That keychain is the same credential the Claude Code VS
+        // Code extension holds, and reading it repeatedly invalidated that session,
+        // forcing constant re-verification. There is no configuration that gets both, so
+        // the app does not read usage at all.
+        //
+        // `claude-primer snapshot --usage` still works on demand, as does `/usage` inside
+        // Claude Code. Re-enabling here means restoring these rows and accepting that
+        // trade knowingly.
 
         // The most recent prime, with its own outcome marker. This replaced the
         // estimated-window row: that estimate is inferred from this tool's own primes
