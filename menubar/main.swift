@@ -121,23 +121,11 @@ struct UnitState: Decodable {
     }
 }
 
-/// Severity is decided in Rust, once. This side only renders it.
-///
-/// The menu bar icon stays the Claude mark in every state, so health is carried by a
-/// prefix on the title instead — a changing icon reads as a different app, and users
-/// find their menu bar item by its shape.
+/// Severity is decided in Rust, once. This side only renders it — on the `Today` row,
+/// not in the menu bar itself.
 enum Health: String, Decodable {
     case ok, warn, error
 
-    /// Appended after the icon. Empty when healthy, so a working setup is just the
-    /// mark and nothing else.
-    var prefix: String {
-        switch self {
-        case .ok: return ""
-        case .warn: return " ⚠"
-        case .error: return " ✗"
-        }
-    }
 }
 
 // MARK: - Icon
@@ -407,11 +395,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        // Icon only. The countdown lives in the dropdown rather than the menu bar, so
-        // the item stays narrow and doesn't visually tick. Health still shows here,
-        // because a problem you have to open a menu to notice is a problem you miss.
+        // The mark alone, in every state. Health is shown on the `Today` row inside the
+        // menu instead — a glyph that appears and disappears in the menu bar makes the
+        // item change width and jump, and there is nothing here urgent enough to justify
+        // that. `?` above is the exception: it means the CLI is unreachable, so the menu
+        // has nothing to say at all.
         button.image = Icon.claude
-        button.title = snap.health.prefix
+        button.title = ""
         fill(menu, snap)
     }
 
